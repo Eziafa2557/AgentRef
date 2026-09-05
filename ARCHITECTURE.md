@@ -17,7 +17,9 @@ when it enters the record, and every hash can be recomputed on demand.
    localStorage ◀── repo.write ── Receipt (REF-…)              ┌──────────────┴──────────────┐           │
        │                                                       │ SIMULATED        │ GENLAYER │           │
    /r/[id] public read-only view                               │ local model      │ contract.py         │
-                                                               │ (evaluate.ts)    │ + adapter.ts        │
+                                                               │ (evaluate.ts)    │ + runtime.ts         │
+                                                               │ source:"simulated"│  → API routes       │
+                                                               │                  │  (server signs)     │
                                                                │ source:"simulated"│ source:"genlayer"   │
                                                                └──────────────────┴──────────────────────┘
    ruling ─▶ parseRulingJson (verify/parser.ts)  ◀── same snake_case schema both paths produce
@@ -31,11 +33,11 @@ on how it labels it.
 
 | | SIMULATED | GENLAYER |
 | --- | --- | --- |
-| Where | `src/core/evaluate.ts` | `genlayer/contract.py` |
-| Who decides | transparent local rules model | validator nodes (Equivalence Principle) |
+| Where | `src/core/evaluate.ts` | `genlayer/contract.py` + `src/core/genlayer/runtime.ts` |
+| Who decides | transparent local rules model | validator nodes (Equivalence Principle, `run_nondet_unsafe`) |
 | `Ruling.source` | `"simulated"` | `"genlayer"` |
-| Labelled in UI | `SIMULATED — validators not consulted` | `GENLAYER · validator consensus` |
-| Needs | nothing | deployed contract + env + optional `genlayer-js` |
+| Labelled in UI | `SIMULATED — validators not consulted` | `REAL GenLayer verification` |
+| Needs | nothing | deployed contract + env + `genlayer-js` (installed, server-only) |
 
 **Honesty rule:** consensus is never faked. The SIMULATED path never claims to
 contact validators; the GENLAYER path never runs without a real network. The
@@ -67,11 +69,9 @@ contact validators; the GENLAYER path never runs without a real network. The
 - **`verify/parser.ts`** — `normalizeVerdict`, `parseRuling`,
   `parseRulingJson`; lenient on booleans, strict on the verdict. This is the
   single consumer for a ruling from *either* path.
-- **`genlayer/config.ts`** — env → `{kind:"not-configured"} | {kind:"ready"}`.
-- **`genlayer/adapter.ts`** — the real path. `submitDispute` writes the payload
-  to the contract (needs a server-side signer key), `readRuling` reads
-  `get_ruling` at the latest finalized round. `genlayer-js` is reached via
-  `webpackIgnore` dynamic import so the app builds **without** it installed.
+- **`genlayer/config.ts`** — client-safe env → `{kind:"not-configured"} | {kind:"ready"}`, mapping each accepted network label (`testnet_bradbury`, `studionet`, …) to its camelCase `genlayer-js/chains` export so users only ever name a network.
+- **`genlayer/runtime.ts`** — **server-only** real path. `submitDispute` writes the payload to the contract with a server-side signer and waits for a FINALIZED, non-error receipt; `readRuling` reads `get_ruling` at the latest finalized round. Static `genlayer-js@1.1.8` imports live here and only here.
+- **`app/api/genlayer/{submit,ruling}/route.ts`** — HTTP bridge: the browser calls these routes; the SDK and the signing key never cross into the client bundle.
 - **`store/repo.ts`** — `ReceiptRepo` interface + memory + localStorage impls.
   Frameworks-free and clone-on-access (callers can’t corrupt state).
 - **`seeds.ts`** — the three demo scenarios. Receipts, not scripts: they can be
@@ -97,21 +97,26 @@ Standard App Router pages (see README → Routes). `verify/page.tsx` drives the
 staged, honest adjudication flow; `challenge/page.tsx` is the unscripted
 dispute composer.
 
-## 3. Why `genlayer-js` is optional
+## 3. Why `genlayer-js` is server-only
 
-Installing a heavy SDK the app never uses (without a deployed contract) would
-bake a fake network dependency into the demo. Instead:
+`genlayer-js` (pinned `1.1.8`, matching the stable testnet) is a real installed
+dependency — the adapter is the genuine SDK, not an ambient declaration. To keep
+the SDK weight and the signing key off the demo phone and out of the client
+bundle, `src/core/genlayer/runtime.ts` is the *only* module that imports it, and
+it is reachable exclusively through Next.js route handlers
+(`app/api/genlayer/*`) on the server:
 
 - `genlayer/contract.py` is the *source of truth* for what validators return.
-- `src/core/genlayer/adapter.ts` only imports the SDK at runtime, and the import
-  is `webpackIgnore`d so the build never tries to resolve it.
-- Without the SDK or env, `getGenLayerConfig()` returns `not-configured` and the
-  UI routes every ruling through the clearly-labelled SIMULATED path.
-- Add `genlayer-js` + env when you deploy the contract; the same UI then shows
-  real `source:"genlayer"` rulings.
+- The browser only ever calls the two JSON routes; `AGENTREF_ACCOUNT_PRIVATE_KEY`
+  lives in server env and never reaches the client.
+- Without env config, `getGenLayerConfig()` returns `not-configured` and the UI
+  routes every ruling through the clearly-labelled SIMULATED path.
 
 This keeps one guarantee: **the demo is never accidentally lying about
-consensus** — there is no half-configured default that silently does nothing.
+consensus** — there is no half-configured default that silently does nothing,
+and a real on-chain ruling is only ever recorded with `source:"genlayer"` after
+`runtime.ts` saw a FINALIZED, non-error receipt for a submission of the exact
+payload hash it then reads back.
 
 ## 4. Integrity model
 

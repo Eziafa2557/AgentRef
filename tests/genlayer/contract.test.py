@@ -1,16 +1,19 @@
 """AgentRef contract tests for the GenLayer harness (NOT run in this repo).
 
 This repo's sandbox has no GenLayer tooling, so these tests are written for the
-official harness and are intentionally not part of `npm test`. To run them,
-check out the project boilerplate (https://github.com/genlayerlabs/genlayer-
-project-boilerplate), install genlayer-test, place contract.py alongside, and:
+official harness and are intentionally not part of `npm test`. To run them, use
+the genlayer CLI / genlayer-test on a machine that has them:
 
-    pytest tests/direct/ -v        # direct VM mode
-    gltest tests/integration/ -v --network localnet
+    genlayer test genlayer/contract.py   # exact invocation per your CLI version
 
-The two call sites marked `@harness` follow the official genlayer-test API
-(direct_vm.mock_llm / run_validator, validator_factory.batch_create_mock_
-validators). If that API has drifted, adapt only those lines.
+The contract reaches consensus with gl.vm.run_nondet_unsafe(adjudicate,
+validator): the LEADER calls the LLM once, and EVERY VALIDATOR re-runs
+adjudicate() (another LLM call per node) then accepts only when the decision
+fields match. So a harness mock must return a CONSISTENT ruling for every round
+— reasoning text may differ, the decision fields must not. The two call sites
+marked `@harness` follow the official genlayer-test API (direct_vm.mock_llm /
+run_validator, validator_factory.batch_create_mock_validators). If that API has
+drifted, adapt only those lines.
 """
 import json
 
@@ -44,7 +47,8 @@ PAYLOAD = json.dumps(
 
 def test_submit_stores_consensus_ruling():
     """A submitted dispute stores the canonical ruling, keyed by challenge id."""
-    # @harness direct-vm wiring:
+    # @harness run_nondet_unsafe wiring — the mock must return PASS_RULING for
+    # the leader AND for every validator re-run (decision fields must agree):
     #   direct_vm.mock_llm(r".*adjudicat.*", json.dumps(PASS_RULING))
     #   c = AgentRefAdjudicator()
     #   c.submit_dispute("CHL-123456", "deadbeef", PAYLOAD)
@@ -65,6 +69,7 @@ def test_ruling_schema_is_directly_parseable_by_the_ts_parser():
         "failed_requirements",
         "missed_material_risks",
         "reasoning",
+        "payload_hash",
     ):
         assert key in ruling, key
     assert ruling["verdict"] in ("PASS", "FAIL", "PASS_WITH_MATERIAL_RISK")

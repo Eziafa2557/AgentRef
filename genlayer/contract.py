@@ -11,17 +11,27 @@ Equivalence Principle + an LLM call — to judge whether the submitted work
 followed the original brief, then stores the canonical, validator-consensus
 ruling keyed by challenge id.
 
+Consensus model (current official guidance, docs.genlayer.com): an LLM call is
+non-deterministic, so `strict_eq` over the full output (including free-form
+`reasoning`) would fail consensus. Instead we use `gl.vm.run_nondet_unsafe`:
+the leader produces a ruling; every validator re-runs the adjudication and
+accepts the leader ONLY when the decision fields match (verdict, the booleans
+and the requirement lists). Reasoning text may legitimately differ across
+nodes and is stored as the leader's, exactly as the docs' resolve_match example
+stores non-compared `analysis`. A malformed leader result forces a rotation
+(the validator returns False rather than agreeing on garbage).
+
 Honesty contract with the app:
   * This contract produces a REAL GenLayer ruling ONLY when deployed and called
-    through genlayer-js / genlayer-py on a running network. Nothing here fakes
-    consensus; when the app is not wired to a network it uses the clearly
-    labelled SIMULATED path in src/core/evaluate.ts instead.
+    through genlayer-js on a running network. Nothing here fakes consensus;
+    when the app is not wired to a network it uses the clearly labelled
+    SIMULATED path in src/core/evaluate.ts instead.
   * The stored ruling JSON mirrors RulingSchema in src/core/types.ts
     (snake_case), so the app's src/core/verify/parser.ts can consume it
     directly. The payload_hash is embedded in the ruling too, binding the
     verdict to the exact material that was sent.
 
-Deploy: see genlayer/README.md (official boilerplate path).
+Deploy: see genlayer/README.md (official CLI / Studio path).
 """
 
 from genlayer import *  # noqa: F401,F403  (brings TreeMap, Address, gl, ...)
@@ -29,14 +39,16 @@ import json
 
 _ALLOWED = ("PASS", "FAIL", "PASS_WITH_MATERIAL_RISK")
 
-_RULING_FIELDS = (
+# Decision fields validators must AGREE on. `reasoning` and `payload_hash` are
+# deliberately excluded: reasoning is free-form (differs per node) and
+# payload_hash is deterministic bookkeeping added at persist time.
+_DECISION_KEYS = (
     "verdict",
     "brief_followed",
     "requirements_met",
     "material_risk_disclosed",
     "failed_requirements",
     "missed_material_risks",
-    "reasoning",
 )
 
 _SCHEMA_HINT = (
@@ -61,8 +73,9 @@ _SCHEMA_HINT = (
 def _coerce_verdict(raw) -> dict:
     """Normalize the LLM response into the canonical RulingSchema dict.
 
-    Raises on anything malformed so the Equivalence-Principle validators treat a
-    bad response as a disagreement rather than silently storing garbage.
+    Raises on anything malformed — a leader that returns garbage becomes an
+    error result, validators return False, and the network rotates to a new
+    leader instead of storing a bad ruling.
     """
     obj = raw
     if isinstance(raw, str):
@@ -87,7 +100,7 @@ def _coerce_verdict(raw) -> dict:
             v = [s for s in v.splitlines() if s.strip()]
         return [str(x).strip() for x in v if str(x).strip()] if isinstance(v, (list, tuple)) else []
 
-    out = {
+    return {
         "verdict": verdict,
         "brief_followed": _b("brief_followed"),
         "requirements_met": _b("requirements_met"),
@@ -96,7 +109,25 @@ def _coerce_verdict(raw) -> dict:
         "missed_material_risks": _arr("missed_material_risks"),
         "reasoning": str(obj.get("reasoning", "") or "").strip(),
     }
-    return out
+
+
+def _decision_fields(ruling) -> str:
+    """Canonical string of the decision fields ONLY — what validators must agree on.
+
+    List order is normalized (sorted) so two nodes that list the same violated
+    requirements in different orders still agree. Returns None for non-dicts so a
+    malformed leader result never matches a valid one.
+    """
+    if not isinstance(ruling, dict):
+        return None
+    norm = {}
+    for key in _DECISION_KEYS:
+        v = ruling.get(key)
+        if isinstance(v, (list, tuple)):
+            norm[key] = sorted(str(x).strip() for x in v if str(x).strip())
+        else:
+            norm[key] = v
+    return json.dumps(norm, sort_keys=True, ensure_ascii=False)
 
 
 def _canonical_json(obj) -> str:
@@ -126,27 +157,41 @@ class AgentRefAdjudicator(gl.Contract):
 
     @gl.public.write
     def submit_dispute(self, challenge_id: str, payload_hash: str, payload: str) -> None:
-        """Submit a dispute. All storage writes happen AFTER validator consensus."""
+        """Submit a dispute. Validator consensus happens FIRST; the ONLY storage
+        writes are afterwards, in deterministic context, on the agreed ruling."""
         if self.rulings.get(challenge_id, "") != "":
-            raise Exception("this challenge has already been adjudicated")
-        # Parse/deterministic check happens outside the nondet block.
-        json.loads(payload)  # fail fast on malformed payload
+            raise gl.UserError("this challenge has already been adjudicated")
+        # Parse check happens outside the nondet block — fail fast on a malformed
+        # payload without ever contacting an LLM.
+        json.loads(payload)
 
-        def adjudicate() -> str:
-            # No storage access allowed inside the nondet block — only the args.
-            raw = gl.nondet.exec_prompt(
-                self._adjudicator_prompt(payload, payload_hash),
-                response_format="json",
-            )
-            ruling = _coerce_verdict(raw)
-            # Embed the fingerprint so the stored ruling names the exact payload.
-            ruling["payload_hash"] = payload_hash
-            return _canonical_json(ruling)
+        prompt = self._adjudicator_prompt(payload, payload_hash)
 
-        agreed = gl.eq_principle.strict_eq(adjudicate)
+        def adjudicate() -> dict:
+            # Nondet block: LLM call only. No storage access, contract calls,
+            # emits, or nested nondet blocks in here (docs: non-determinism).
+            raw = gl.nondet.exec_prompt(prompt, response_format="json")
+            return _coerce_verdict(raw)
 
-        # Consensus reached — now (deterministic context) persist.
-        self.rulings[challenge_id] = agreed
+        def validator(leader_result) -> bool:
+            # Validators receive the leader's outcome wrapped in gl.vm.Return
+            # (or a UserError/VMError when the leader failed).
+            if not isinstance(leader_result, gl.vm.Return):
+                return False  # leader failed — do NOT agree; force rotation
+            try:
+                mine = adjudicate()
+            except Exception:
+                return False
+            # Compare ONLY the decision fields — reasoning text differs across
+            # nodes and must not block consensus.
+            return _decision_fields(leader_result.calldata) == _decision_fields(mine)
+
+        agreed = gl.vm.run_nondet_unsafe(adjudicate, validator)
+
+        # Consensus reached on `agreed` (the leader's ruling, whose decision
+        # fields every validator matched). Deterministic context — persist.
+        agreed["payload_hash"] = payload_hash
+        self.rulings[challenge_id] = _canonical_json(agreed)
         self.payload_hashes[challenge_id] = payload_hash
         self.submitters[challenge_id] = gl.message.sender_address.as_hex
 

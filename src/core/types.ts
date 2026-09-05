@@ -195,4 +195,11 @@ export interface RulingSchema {
 /** Adjudicator configuration state. */
 export type GenLayerConfigStatus =
   | { kind: "not-configured"; reason: string }
-  | { kind: "ready"; network: string; contractAddress: string; chainLabel: string };
+  | {
+      kind: "ready";
+      network: string;
+      /** genlayer-js/chains export name (e.g. "testnetBradbury"). */
+      chainKey: string;
+      contractAddress: string;
+      chainLabel: string;
+    };

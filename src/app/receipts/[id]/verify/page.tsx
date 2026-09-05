@@ -21,7 +21,7 @@ import { Badge, Btn, Card, LinkBtn, PulseDot, cx } from "@/components/ui";
 import { simulateRuling } from "@/core/evaluate";
 import { buildVerificationRequest } from "@/core/verify/request";
 import { getGenLayerConfig } from "@/core/genlayer/config";
-import { readRuling, submitDispute } from "@/core/genlayer/adapter";
+import { parseRulingJson } from "@/core/verify/parser";
 import { VERDICT_META } from "@/lib/labels";
 import { shortKey } from "@/lib/format";
 import { ReceiptView } from "@/components/receipt-view";
@@ -48,28 +48,32 @@ export default function VerifyPage() {
   const { getReceipt, hydrated, submitForReview, recordRuling } = useAgentRef();
   const receipt = getReceipt(id);
 
-  const [mode, setMode] = useState<Mode>("simulated");
+  const [glConfig] = useState(() => getGenLayerConfig());
+  const isGenReady = glConfig.kind === "ready";
+  const [mode, setMode] = useState<Mode>(isGenReady ? "genlayer" : "simulated");
   const [phase, setPhase] = useState<Phase>("setup");
   const [step, setStep] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [glConfig] = useState(() => getGenLayerConfig());
 
   const startedRef = useRef(false);
   const cancelRef = useRef(false);
   const finalReceipt = receipt?.ruling ? receipt : null;
 
   const canRun = !!receipt?.challenge && !receipt.ruling;
-  const isGenReady = glConfig.kind === "ready";
 
-  // Auto-run once when we land with a fresh challenge (fast demo path).
+  // Auto-run only when GenLayer is NOT configured: the one-tap demo path stays
+  // the SIMULATED adjudicator. When a real contract is configured we never
+  // auto-fire an on-chain write — the judge explicitly picks REAL GENLAYER.
   useEffect(() => {
     if (!hydrated) return;
-    if (receipt?.challenge && !receipt.ruling && receipt.settlement !== "UNDER_REVIEW" && !startedRef.current) {
-      startedRef.current = true;
-      begin(mode);
+    if (glConfig.kind !== "ready") {
+      if (receipt?.challenge && !receipt.ruling && receipt.settlement !== "UNDER_REVIEW" && !startedRef.current) {
+        startedRef.current = true;
+        begin("simulated");
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, receipt?.id, receipt?.settlement]);
+  }, [hydrated, receipt?.id, receipt?.settlement, glConfig.kind]);
 
   const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
 
@@ -103,47 +107,89 @@ export default function VerifyPage() {
       return;
     }
 
-    // GenLayer path (real).
-    const steps = GL_STEPS;
-    const submitCur = getReceipt(id)!;
-    for (let i = 0; i < steps.length; i++) {
+    // REAL GenLayer path: every call goes through the server routes so the
+    // signing key never leaves the server. submit waits for FINALIZED on-chain;
+    // then we read get_ruling at the latest FINAL round and bind it to the
+    // exact payload we sent (payload_hash must match).
+    if (which === "genlayer") {
+      setPhase("running");
+      setStep(0);
+
+      let cur = getReceipt(id);
+      if (!cur?.challenge || cur.ruling) return;
+      if (cur.settlement !== "UNDER_REVIEW") cur = submitForReview(id);
+      const challenge = cur.challenge;
+      if (!challenge) return;
+
+      const req = buildVerificationRequest(cur); // throws if malformed — fine
+      const challengeId = challenge.id;
+      const payloadHash = req.payloadHash;
+
+      // 1) submit (server signs + waits for finality)
       if (cancelRef.current) return;
-      setStep(i);
-      if (i === 1) {
-        try {
-          if (submitCur.settlement !== "UNDER_REVIEW") submitForReview(id);
-          const out = await submitDispute(submitCur);
-          if (out.status === "error") throw new Error(out.message);
-          if (out.status === "not-configured") throw new Error(out.reason);
-        } catch (e) {
-          setErrorMsg(e instanceof Error ? e.message : "Submit failed.");
-          setPhase("error");
-          return;
+      setStep(1);
+      let transactionHash: string | undefined;
+      try {
+        const res = await fetch("/api/genlayer/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challengeId, payloadHash, payload: JSON.stringify(req) }),
+        });
+        const out = (await res.json()) as { status: string; message?: string; reason?: string; transactionHash?: string };
+        if (out.status === "error" || out.status === "not-configured") {
+          throw new Error(out.message ?? out.reason ?? "Submission failed.");
         }
+        transactionHash = out.transactionHash;
+      } catch (e) {
+        setErrorMsg(e instanceof Error ? e.message : "Submit to GenLayer failed.");
+        setPhase("error");
+        return;
       }
-      if (i === 2) {
-        // poll until finality
-        let rulingOut;
-        for (let attempt = 0; attempt < 6; attempt++) {
+
+      // 2) read the consensus ruling (the submit already reached finality, so a
+      //    short poll is enough; a longer wait just re-checks the contract).
+      if (cancelRef.current) return;
+      setStep(2);
+      let rulingRaw: string | null = null;
+      try {
+        for (let attempt = 0; attempt < 8; attempt++) {
           if (cancelRef.current) return;
-          await sleep(attempt === 0 ? 800 : 1400);
-          rulingOut = await readRuling(getReceipt(id)!);
-          if (rulingOut.status === "ruling") break;
+          const res = await fetch(`/api/genlayer/ruling?challengeId=${encodeURIComponent(challengeId)}`);
+          const out = (await res.json()) as { status: string; message?: string; rawRuling?: string };
+          if (out.status === "ruling" && out.rawRuling) {
+            rulingRaw = out.rawRuling;
+            break;
+          }
+          if (out.status === "error") throw new Error(out.message ?? "Reading the ruling failed.");
+          await sleep(attempt === 0 ? 1200 : 2500);
         }
-        if (rulingOut?.status === "ruling") {
-          recordRuling(id, rulingOut.ruling);
-        } else {
-          setErrorMsg(
-            rulingOut?.status === "error"
-              ? rulingOut.message
-              : "Dispute submitted but the ruling has not reached finality yet. Check the contract in a moment."
+        if (!rulingRaw) {
+          throw new Error(
+            "Dispute submitted, but the ruling has not reached a readable FINAL state yet. It may still finalize — check the contract explorer with the transaction id."
           );
-          setPhase("error");
-          return;
         }
+        // The contract embeds payload_hash in the ruling — verify it names the
+        // exact payload we submitted before trusting it.
+        const obj = JSON.parse(rulingRaw) as { payload_hash?: string };
+        if (obj.payload_hash && obj.payload_hash !== payloadHash) {
+          throw new Error("The contract returned a ruling for a DIFFERENT payload hash. Refusing to record it.");
+        }
+        const ruling = parseRulingJson(rulingRaw, "genlayer", {
+          transactionHash,
+          contractAddress: isGenReady ? glConfig.contractAddress : undefined,
+        });
+        if (cancelRef.current) return;
+        setStep(3);
+        recordRuling(id, ruling);
+      } catch (e) {
+        setErrorMsg(e instanceof Error ? e.message : "Recording the GenLayer ruling failed.");
+        setPhase("error");
+        return;
       }
+
+      setPhase("done");
+      return;
     }
-    setPhase("done");
   }
 
   function renderNothing() {
@@ -226,9 +272,9 @@ export default function VerifyPage() {
                 </span>
                 {mode === "simulated" && <CheckCircle2 className="h-4 w-4 text-violet-300" />}
               </div>
-              <p className="mt-2.5 text-sm font-semibold text-white">SIMULATED adjudicator</p>
+              <p className="mt-2.5 text-sm font-semibold text-white">SIMULATED verification</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                Transparent local rules model. Instant, deterministic — validators are NOT consulted.
+                Transparent local rules model. Instant, deterministic — GenLayer validators are NOT contacted.
               </p>
             </button>
 
@@ -247,9 +293,13 @@ export default function VerifyPage() {
                 </span>
                 {mode === "genlayer" && <CheckCircle2 className="h-4 w-4 text-cyan-300" />}
               </div>
-              <p className="mt-2.5 text-sm font-semibold text-white">GENLAYER validators</p>
+              <p className="mt-2.5 text-sm font-semibold text-white">
+                {isGenReady ? "REAL GenLayer verification" : "GENLAYER validators"}
+              </p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                {isGenReady ? `Real consensus on ${glConfig.chainLabel}.` : "Not configured — deploy the contract and set NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS."}
+                {isGenReady
+                  ? `Actual validator consensus on ${glConfig.chainLabel} — submits a real on-chain transaction.`
+                  : "Not configured — deploy the contract and set NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS."}
               </p>
             </button>
           </div>
@@ -264,11 +314,11 @@ export default function VerifyPage() {
             >
               {mode === "simulated" ? (
                 <>
-                  <FlaskConical className="h-4.5 w-4.5" /> Run SIMULATED adjudication
+                  <FlaskConical className="h-4.5 w-4.5" /> Run SIMULATED verification
                 </>
               ) : (
                 <>
-                  <Cpu className="h-4.5 w-4.5" /> Submit to GenLayer validators
+                  <Cpu className="h-4.5 w-4.5" /> Submit to REAL GenLayer validators
                 </>
               )}
             </Btn>
@@ -285,7 +335,7 @@ export default function VerifyPage() {
           <div className="flex items-center gap-2">
             <PulseDot tone={mode === "simulated" ? "violet" : "cyan"} />
             <p className="text-sm font-bold text-white">
-              {mode === "simulated" ? "SIMULATED adjudication" : "Submitting to GenLayer"}
+              {mode === "simulated" ? "SIMULATED verification — local rules model" : "REAL GenLayer verification — on-chain"}
             </p>
           </div>
           <div className="mt-4 space-y-0">
@@ -314,6 +364,13 @@ export default function VerifyPage() {
             <p className="mt-3 rounded-xl border border-amber-400/15 bg-amber-500/[0.04] px-3.5 py-2 text-[11px] leading-relaxed text-amber-200/80">
               Honesty note: the pacing is animated for the demo; the SIMULATED computation itself is instantaneous and
               deterministic. GenLayer validators are never contacted on this path.
+            </p>
+          )}
+          {mode === "genlayer" && isGenReady && (
+            <p className="mt-3 rounded-xl border border-cyan-400/15 bg-cyan-500/[0.04] px-3.5 py-2 text-[11px] leading-relaxed text-cyan-200/80">
+              This sends a REAL transaction to AgentRefAdjudicator on {glConfig.chainLabel}. No ruling is recorded
+              unless the validators finalize it; if finalization is slow, the transaction id is shown so you can
+              follow it on the explorer.
             </p>
           )}
         </Card>
