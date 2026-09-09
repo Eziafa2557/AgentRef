@@ -22,25 +22,28 @@ when it enters the record, and every hash can be recomputed on demand.
                                                                │                  │  (server signs)     │
                                                                │ source:"simulated"│ source:"genlayer"   │
                                                                └──────────────────┴──────────────────────┘
-   ruling ─▶ parseRulingJson (verify/parser.ts)  ◀── same snake_case schema both paths produce
+   ruling ─▶ SIMULATED: parseRulingJson (RulingSchema)  ·  GENLAYER: onchainRuling (live get_receipt() record)
 ```
 
 ### The two adjudicator paths
 
-Both produce a **ruling in the exact same shape** (`RulingSchema`,
-`src/core/types.ts`), so the app never forks on where a verdict came from — only
-on how it labels it.
+Both produce an AgentRef **`Ruling`** (`src/core/types.ts`), so the app never
+forks on where a verdict came from — only on how it labels it. The SIMULATED
+path derives one through the snake_case `RulingSchema` (`parseRulingJson`); the
+live GenLayer path builds one from the flat `get_receipt()` record
+(`contract.ts` → `onchainRuling`).
 
-| | SIMULATED | GENLAYER |
+| | SIMULATED fallback | GENLAYER (live) |
 | --- | --- | --- |
-| Where | `src/core/evaluate.ts` | `genlayer/contract.py` + `src/core/genlayer/runtime.ts` |
-| Who decides | transparent local rules model | validator nodes (Equivalence Principle, `run_nondet_unsafe`) |
+| Where | `src/core/evaluate.ts` | live Bradbury contract via `src/core/genlayer/runtime.ts` |
+| Who decides | transparent local rules model | GenLayer validators on Testnet — Bradbury |
 | `Ruling.source` | `"simulated"` | `"genlayer"` |
-| Labelled in UI | `SIMULATED — validators not consulted` | `REAL GenLayer verification` |
-| Needs | nothing | deployed contract + env + `genlayer-js` (installed, server-only) |
+| Labelled in UI | `SIMULATED fallback` | `GENLAYER` + on-chain `Status` / `Score` / `Reason` |
+| Needs | nothing | reads: nothing · writes: `AGENTREF_ACCOUNT_PRIVATE_KEY` (funded) |
 
 **Honesty rule:** consensus is never faked. The SIMULATED path never claims to
-contact validators; the GENLAYER path never runs without a real network. The
+contact validators; the GENLAYER path never runs without the live contract, and
+**the moment an on-chain verdict is shown the SIMULATED result is hidden.** The
 `source` field is the single source of truth the whole UI reads.
 
 ## 2. Module map
@@ -67,11 +70,24 @@ contact validators; the GENLAYER path never runs without a real network. The
   dispute payload (brief, work, challenge, hashed evidence) and fingerprints it
   (`payloadHash`). Pure function — the payload is reproducible from the record.
 - **`verify/parser.ts`** — `normalizeVerdict`, `parseRuling`,
-  `parseRulingJson`; lenient on booleans, strict on the verdict. This is the
-  single consumer for a ruling from *either* path.
-- **`genlayer/config.ts`** — client-safe env → `{kind:"not-configured"} | {kind:"ready"}`, mapping each accepted network label (`testnet_bradbury`, `studionet`, …) to its camelCase `genlayer-js/chains` export so users only ever name a network.
-- **`genlayer/runtime.ts`** — **server-only** real path. `submitDispute` writes the payload to the contract with a server-side signer and waits for a FINALIZED, non-error receipt; `readRuling` reads `get_ruling` at the latest finalized round. Static `genlayer-js@1.1.8` imports live here and only here.
-- **`app/api/genlayer/{submit,ruling}/route.ts`** — HTTP bridge: the browser calls these routes; the SDK and the signing key never cross into the client bundle.
+  `parseRulingJson`; lenient on booleans, strict on the verdict. The SIMULATED
+  path and legacy JSON rulings go through here; the live GenLayer path builds
+  its Ruling from the flat on-chain record via `genlayer/contract.ts`.
+- **`genlayer/contract.ts`** — pure model of the **live** deployed contract:
+  `LIVE_CONTRACT` (address, network, deploy tx), the `get_receipt()` pipe-delimited
+  format parser (`parseReceiptLine`), `verdictForStatus` and `onchainRuling`.
+- **`genlayer/config.ts`** — client-safe env → `{kind:"ready"}`, defaulting to
+  the live contract (address + `testnet_bradbury`), mapping each accepted
+  network label to its camelCase `genlayer-js/chains` export so users only ever
+  name a network.
+- **`genlayer/runtime.ts`** — **server-only** real path. `adjudicateOnChain`
+  runs `create_receipt → challenge → adjudicate()` on the live contract with a
+  server-side signer, each write awaited to a FINALIZED, non-error receipt;
+  `readOnChainReceipt` reads `get_receipt()` at the latest finalized round (no
+  key needed). Static `genlayer-js@1.1.8` imports live here and only here.
+- **`app/api/genlayer/{adjudicate,receipt}/route.ts`** — HTTP bridge: the
+  browser calls these routes; the SDK and the signing key never cross into the
+  client bundle.
 - **`store/repo.ts`** — `ReceiptRepo` interface + memory + localStorage impls.
   Frameworks-free and clone-on-access (callers can’t corrupt state).
 - **`seeds.ts`** — the three demo scenarios. Receipts, not scripts: they can be
@@ -106,17 +122,21 @@ bundle, `src/core/genlayer/runtime.ts` is the *only* module that imports it, and
 it is reachable exclusively through Next.js route handlers
 (`app/api/genlayer/*`) on the server:
 
-- `genlayer/contract.py` is the *source of truth* for what validators return.
-- The browser only ever calls the two JSON routes; `AGENTREF_ACCOUNT_PRIVATE_KEY`
-  lives in server env and never reaches the client.
-- Without env config, `getGenLayerConfig()` returns `not-configured` and the UI
-  routes every ruling through the clearly-labelled SIMULATED path.
+- `src/core/genlayer/contract.ts` is the *source of truth* for the live contract
+  surface and the `get_receipt()` record format.
+- The browser only ever calls the two JSON routes (`/api/genlayer/adjudicate`,
+  `/api/genlayer/receipt`); `AGENTREF_ACCOUNT_PRIVATE_KEY` lives in server env
+  and never reaches the client.
+- Without a signer key the app can still **read** the shared on-chain verdict
+  (the address is public); adjudicating (writes) additionally needs the key, and
+  the UI is explicit about which is which.
 
 This keeps one guarantee: **the demo is never accidentally lying about
 consensus** — there is no half-configured default that silently does nothing,
 and a real on-chain ruling is only ever recorded with `source:"genlayer"` after
-`runtime.ts` saw a FINALIZED, non-error receipt for a submission of the exact
-payload hash it then reads back.
+`runtime.ts` read a FINALIZED `get_receipt()` reporting a decided Status
+(`VERIFIED` / `NOT_VERIFIED`), which the UI shows alongside the contract's
+Score, Reason and an explorer link.
 
 ## 4. Integrity model
 

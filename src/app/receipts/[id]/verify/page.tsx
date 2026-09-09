@@ -12,18 +12,18 @@ import {
   FlaskConical,
   Gavel,
   LoaderCircle,
-  Lock,
   ShieldCheck,
+  XCircle,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useAgentRef } from "@/lib/agentref-provider";
 import { Badge, Btn, Card, LinkBtn, PulseDot, cx } from "@/components/ui";
 import { simulateRuling } from "@/core/evaluate";
-import { buildVerificationRequest } from "@/core/verify/request";
 import { getGenLayerConfig } from "@/core/genlayer/config";
-import { parseRulingJson } from "@/core/verify/parser";
+import { onchainRuling, LIVE_CONTRACT, explorerTxUrl, type OnchainReceiptRecord } from "@/core/genlayer/contract";
 import { VERDICT_META } from "@/lib/labels";
-import { shortKey } from "@/lib/format";
+import type { Ruling } from "@/core/types";
+import { Journey } from "@/components/journey";
 import { ReceiptView } from "@/components/receipt-view";
 
 type Mode = "simulated" | "genlayer";
@@ -31,15 +31,14 @@ type Phase = "setup" | "running" | "done" | "error";
 
 const SIM_STEPS = [
   { title: "Snapshot the dispute corpus", detail: "Builds the exact payload the adjudicator will see — brief, requirements, work, challenge and hashed evidence." },
-  { title: "SIMULATED — local rules model", detail: "No GenLayer validators are contacted. A transparent, inspectable model checks each requirement against the work." },
+  { title: "SIMULATED — local rules model (fallback)", detail: "GenLayer validators are NOT contacted. A transparent, inspectable model checks each requirement against the work so the flow still runs without a funded key." },
   { title: "Record the ruling", detail: "Persists the verdict on the receipt and advances the escrow state machine." },
 ];
 
 const GL_STEPS = [
-  { title: "Build & fingerprint payload", detail: "Computes the payload hash that binds the ruling to exactly this material." },
-  { title: "Submit dispute to the contract", detail: "Calls submit_dispute on AgentRefAdjudicator with the server-side signer." },
-  { title: "Await validator consensus", detail: "Reads get_ruling at the latest finalized round until the ruling is available." },
-  { title: "Record the ruling", detail: "Stores the on-chain verdict and its provenance on the receipt." },
+  { title: "Adjudicate on GenLayer validators", detail: "create_receipt → challenge → adjudicate() on the live Testnet — Bradbury contract. Validator consensus decides — not an in-app AI." },
+  { title: "Read the on-chain verdict", detail: "Calls get_receipt() and parses Status / Score / Reason from the contract's public record." },
+  { title: "Record the verdict", detail: "Saves the GenLayer verdict + explorer link on the receipt and settles the escrow." },
 ];
 
 export default function VerifyPage() {
@@ -50,147 +49,174 @@ export default function VerifyPage() {
 
   const [glConfig] = useState(() => getGenLayerConfig());
   const isGenReady = glConfig.kind === "ready";
+  const glChainLabel = glConfig.kind === "ready" ? glConfig.chainLabel : LIVE_CONTRACT.chainLabel;
+  const glContractAddr = glConfig.kind === "ready" ? glConfig.contractAddress : LIVE_CONTRACT.address;
   const [mode, setMode] = useState<Mode>(isGenReady ? "genlayer" : "simulated");
   const [phase, setPhase] = useState<Phase>("setup");
   const [step, setStep] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const startedRef = useRef(false);
-  const cancelRef = useRef(false);
-  const finalReceipt = receipt?.ruling ? receipt : null;
-
-  const canRun = !!receipt?.challenge && !receipt.ruling;
-
-  // Auto-run only when GenLayer is NOT configured: the one-tap demo path stays
-  // the SIMULATED adjudicator. When a real contract is configured we never
-  // auto-fire an on-chain write — the judge explicitly picks REAL GENLAYER.
-  useEffect(() => {
-    if (!hydrated) return;
-    if (glConfig.kind !== "ready") {
-      if (receipt?.challenge && !receipt.ruling && receipt.settlement !== "UNDER_REVIEW" && !startedRef.current) {
-        startedRef.current = true;
-        begin("simulated");
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, receipt?.id, receipt?.settlement, glConfig.kind]);
-
   const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
+  const freshChallenge = !!receipt?.challenge && !receipt?.ruling;
 
-  async function begin(which: Mode) {
-    cancelRef.current = false;
-    setErrorMsg(null);
+  /* ------------------------------------------------------------- */
+  /* SIMULATED — labelled fallback only. Never claims validators.  */
+  async function runSimulated() {
     const cur = getReceipt(id);
     if (!cur?.challenge || cur.ruling) return;
-    setMode(which);
+    setErrorMsg(null);
+    setMode("simulated");
+    setPhase("running");
+    setStep(0);
+    for (let i = 0; i < SIM_STEPS.length; i++) {
+      setStep(i);
+      await sleep(i === 1 ? 1100 : 620);
+    }
+    try {
+      let latest = getReceipt(id)!;
+      if (latest.settlement !== "UNDER_REVIEW") latest = submitForReview(id);
+      recordRuling(id, simulateRuling(latest));
+      setPhase("done");
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Verification failed.");
+      setPhase("error");
+    }
+  }
+
+  /* ------------------------------------------------------------- */
+  /* REAL GenLayer: adjudicate (server-signed writes) then read.    */
+  async function adjudicateOnGenLayer() {
+    const cur = getReceipt(id);
+    if (!cur?.challenge || cur.ruling) return;
+    setErrorMsg(null);
+    setMode("genlayer");
     setPhase("running");
     setStep(0);
 
-    if (which === "simulated") {
-      const steps = SIM_STEPS;
-      for (let i = 0; i < steps.length; i++) {
-        if (cancelRef.current) return;
-        setStep(i);
-        await sleep(i === 1 ? 1100 : 620);
+    let latest = cur;
+    if (latest.settlement !== "UNDER_REVIEW") latest = submitForReview(id);
+    const challenge = latest.challenge!;
+    const evidence = challenge.evidence.map((e) => ({ label: e.label, content: e.content }));
+
+    // 1) adjudicate — server signs create_receipt → challenge → adjudicate
+    setStep(1);
+    let out: { status?: string; message?: string; reason?: string; transactionHash?: string; contractAddress?: string };
+    try {
+      const res = await fetch("/api/genlayer/adjudicate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          brief: latest.brief,
+          work: latest.work,
+          agent: latest.agentName,
+          reason: challenge.reason,
+          evidence,
+        }),
+      });
+      out = (await res.json()) as typeof out;
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Submitting the dispute to GenLayer failed.");
+      setPhase("error");
+      return;
+    }
+    if (out.status === "error" || out.status === "not-configured") {
+      setErrorMsg(out.message ?? out.reason ?? "Adjudication on GenLayer failed.");
+      setPhase("error");
+      return;
+    }
+    const txHash = out.transactionHash!;
+
+    // 2) read get_receipt until the verdict is on the record
+    setStep(2);
+    let record: OnchainReceiptRecord | null = null;
+    try {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const r = await fetch("/api/genlayer/receipt");
+        const ro = (await r.json()) as { status: string; message?: string; record?: OnchainReceiptRecord };
+        if (ro.status === "receipt" && ro.record) {
+          record = ro.record;
+          break;
+        }
+        if (ro.status === "error") throw new Error(ro.message ?? "Reading the verdict failed.");
+        await sleep(attempt === 0 ? 1500 : 3000);
       }
-      if (cancelRef.current) return;
-      try {
-        let latest = getReceipt(id)!;
-        if (latest.settlement !== "UNDER_REVIEW") latest = submitForReview(id);
-        const ruling = simulateRuling(latest);
-        recordRuling(id, ruling);
-        setPhase("done");
-      } catch (e) {
-        setErrorMsg(e instanceof Error ? e.message : "Verification failed.");
-        setPhase("error");
-      }
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Reading the GenLayer verdict failed.");
+      setPhase("error");
+      return;
+    }
+    if (!record) {
+      setErrorMsg(
+        "The dispute was adjudicated on-chain, but the verdict has not reached a readable FINAL state yet. Follow the transaction on the explorer and come back — the verdict may still finalize."
+      );
+      setPhase("error");
       return;
     }
 
-    // REAL GenLayer path: every call goes through the server routes so the
-    // signing key never leaves the server. submit waits for FINALIZED on-chain;
-    // then we read get_ruling at the latest FINAL round and bind it to the
-    // exact payload we sent (payload_hash must match).
-    if (which === "genlayer") {
-      setPhase("running");
-      setStep(0);
-
-      let cur = getReceipt(id);
-      if (!cur?.challenge || cur.ruling) return;
-      if (cur.settlement !== "UNDER_REVIEW") cur = submitForReview(id);
-      const challenge = cur.challenge;
-      if (!challenge) return;
-
-      const req = buildVerificationRequest(cur); // throws if malformed — fine
-      const challengeId = challenge.id;
-      const payloadHash = req.payloadHash;
-
-      // 1) submit (server signs + waits for finality)
-      if (cancelRef.current) return;
-      setStep(1);
-      let transactionHash: string | undefined;
-      try {
-        const res = await fetch("/api/genlayer/submit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ challengeId, payloadHash, payload: JSON.stringify(req) }),
-        });
-        const out = (await res.json()) as { status: string; message?: string; reason?: string; transactionHash?: string };
-        if (out.status === "error" || out.status === "not-configured") {
-          throw new Error(out.message ?? out.reason ?? "Submission failed.");
-        }
-        transactionHash = out.transactionHash;
-      } catch (e) {
-        setErrorMsg(e instanceof Error ? e.message : "Submit to GenLayer failed.");
-        setPhase("error");
-        return;
-      }
-
-      // 2) read the consensus ruling (the submit already reached finality, so a
-      //    short poll is enough; a longer wait just re-checks the contract).
-      if (cancelRef.current) return;
-      setStep(2);
-      let rulingRaw: string | null = null;
-      try {
-        for (let attempt = 0; attempt < 8; attempt++) {
-          if (cancelRef.current) return;
-          const res = await fetch(`/api/genlayer/ruling?challengeId=${encodeURIComponent(challengeId)}`);
-          const out = (await res.json()) as { status: string; message?: string; rawRuling?: string };
-          if (out.status === "ruling" && out.rawRuling) {
-            rulingRaw = out.rawRuling;
-            break;
-          }
-          if (out.status === "error") throw new Error(out.message ?? "Reading the ruling failed.");
-          await sleep(attempt === 0 ? 1200 : 2500);
-        }
-        if (!rulingRaw) {
-          throw new Error(
-            "Dispute submitted, but the ruling has not reached a readable FINAL state yet. It may still finalize — check the contract explorer with the transaction id."
-          );
-        }
-        // The contract embeds payload_hash in the ruling — verify it names the
-        // exact payload we submitted before trusting it.
-        const obj = JSON.parse(rulingRaw) as { payload_hash?: string };
-        if (obj.payload_hash && obj.payload_hash !== payloadHash) {
-          throw new Error("The contract returned a ruling for a DIFFERENT payload hash. Refusing to record it.");
-        }
-        const ruling = parseRulingJson(rulingRaw, "genlayer", {
-          transactionHash,
-          contractAddress: isGenReady ? glConfig.contractAddress : undefined,
-        });
-        if (cancelRef.current) return;
-        setStep(3);
-        recordRuling(id, ruling);
-      } catch (e) {
-        setErrorMsg(e instanceof Error ? e.message : "Recording the GenLayer ruling failed.");
-        setPhase("error");
-        return;
-      }
-
-      setPhase("done");
+    const ruling = onchainRuling(record, {
+      receivedAt: new Date().toISOString(),
+      transactionHash: txHash,
+      contractAddress: out.contractAddress ?? (glConfig.kind === "ready" ? glConfig.contractAddress : undefined),
+    });
+    if (!ruling) {
+      setErrorMsg(`The contract returned an unmapped status (“${record.status}”). No verdict was recorded.`);
+      setPhase("error");
       return;
     }
+    setStep(3);
+    recordRuling(id, ruling);
+    setPhase("done");
   }
+
+  /* ------------------------------------------------------------- */
+  /* REAL GenLayer (read-only): show whatever the shared live       */
+  /* contract currently holds — needs no wallet or key.             */
+  async function readSharedVerdict() {
+    const cur = getReceipt(id);
+    if (!cur?.challenge || cur.ruling) return;
+    setErrorMsg(null);
+    setMode("genlayer");
+    setPhase("running");
+    setStep(1);
+    let ro: { status: string; message?: string; note?: string; record?: OnchainReceiptRecord; contractAddress?: string };
+    try {
+      const r = await fetch("/api/genlayer/receipt");
+      ro = (await r.json()) as typeof ro;
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Reading the shared on-chain record failed.");
+      setPhase("error");
+      return;
+    }
+    if (ro.status === "error") {
+      setErrorMsg(ro.message ?? "Reading the shared on-chain record failed.");
+      setPhase("error");
+      return;
+    }
+    if (ro.status !== "receipt" || !ro.record) {
+      setErrorMsg(
+        ro.note ??
+          "The shared live contract has no adjudicated verdict to read yet. Run the full adjudication (needs a funded server key) or come back once one has been ruled."
+      );
+      setPhase("error");
+      return;
+    }
+    let latest = getReceipt(id)!;
+    if (latest.settlement !== "UNDER_REVIEW") latest = submitForReview(id);
+    const ruling = onchainRuling(ro.record, {
+      receivedAt: new Date().toISOString(),
+      contractAddress: ro.contractAddress ?? (glConfig.kind === "ready" ? glConfig.contractAddress : undefined),
+    });
+    if (!ruling) {
+      setErrorMsg(`The contract returned an unmapped status (“${ro.record.status}”). No verdict was recorded.`);
+      setPhase("error");
+      return;
+    }
+    setStep(3);
+    recordRuling(id, ruling);
+    setPhase("done");
+  }
+
+  /* ------------------------------------------------------------- */
 
   function renderNothing() {
     return <div className="shimmer h-72 rounded-3xl border border-white/[0.06]" />;
@@ -207,11 +233,11 @@ export default function VerifyPage() {
     );
   }
 
-  const payload = receipt.challenge ? buildVerificationRequest(receipt) : null;
-  const freshChallenge = !!receipt.challenge && !receipt.ruling;
+  const journeyStep = receipt.ruling ? 6 : 5;
 
   return (
     <div className="flex flex-col gap-4">
+      <Journey step={journeyStep} accent={mode === "simulated" ? "violet" : "cyan"} />
       <Link href={`/receipts/${receipt.id}`} className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-slate-200">
         <ArrowLeft className="h-3.5 w-3.5" /> Back to receipt
       </Link>
@@ -227,35 +253,56 @@ export default function VerifyPage() {
         </p>
       </div>
 
-      {/* payload fingerprint */}
-      {payload && (
-        <Card className="flex flex-wrap items-center justify-between gap-2 p-3.5">
-          <div className="flex items-center gap-2 text-[11.5px] text-slate-400">
-            <Lock className="h-3.5 w-3.5 text-cyan-300" />
-            What will be sent · payload fingerprint
-          </div>
-          <span className="font-mono text-[11px] text-slate-300">{shortKey(payload.payloadHash, 14, 8)}</span>
-        </Card>
-      )}
+      {/* what will be sent */}
+      <Card className="p-3.5">
+        <p className="text-[11px] leading-relaxed text-slate-400">
+          {mode === "genlayer" || receipt.ruling?.source === "genlayer" ? (
+            <>
+              <span className="font-semibold text-cyan-200/90">Judged by GenLayer validators</span> — the app calls{" "}
+              <code className="font-mono text-[10px] text-slate-300">create_receipt(brief, work, evidence, agent)</code> →{" "}
+              <code className="font-mono text-[10px] text-slate-300">challenge(reason, evidence)</code> →{" "}
+              <code className="font-mono text-[10px] text-slate-300">adjudicate()</code> on the live Intelligent Contract, then reads{" "}
+              <code className="font-mono text-[10px] text-slate-300">get_receipt()</code>. No in-app AI is consulted.
+            </>
+          ) : (
+            <>
+              <span className="font-semibold text-violet-200/90">SIMULATED fallback</span> — a transparent local model
+              judges this dispute. GenLayer validators are <em>not</em> contacted, and the verdict is labelled SIMULATED.
+              Once a real on-chain verdict is shown, this fallback is hidden.
+            </>
+          )}
+        </p>
+      </Card>
 
       {receipt.ruling ? (
-        /* ------- already ruled ------- */
+        /* ---------------- already ruled ---------------- */
         <div className="flex flex-col gap-4">
-          <Card className="p-5 text-center" glow={receipt.ruling.verdict === "PASS" ? "pass" : receipt.ruling.verdict === "FAIL" ? "fail" : undefined}>
-            <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl border border-emerald-400/30 bg-emerald-500/10 text-emerald-300">
-              <ShieldCheck className="h-7 w-7" />
-            </div>
-            <Badge tone={VERDICT_META[receipt.ruling.verdict].tone}>{VERDICT_META[receipt.ruling.verdict].label}</Badge>
-            <p className="mt-2 text-lg font-bold text-white">This dispute is settled</p>
-            <p className="mx-auto mt-1 max-w-md text-sm text-slate-400">{VERDICT_META[receipt.ruling.verdict].detail}</p>
-            <LinkBtn href={`/receipts/${receipt.id}`} className="mt-4" tone="ghost">
-              Open the full record <ExternalLink className="h-4 w-4" />
-            </LinkBtn>
-          </Card>
+          {receipt.ruling.source === "genlayer" ? (
+            <OnchainVerdictCard ruling={receipt.ruling} receiptId={receipt.id} />
+          ) : (
+            <Card
+              className="p-5 text-center"
+              glow={receipt.ruling.verdict === "PASS" ? "pass" : receipt.ruling.verdict === "FAIL" ? "fail" : undefined}
+            >
+              <div
+                className={cx(
+                  "mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl border",
+                  receipt.ruling.verdict === "PASS"
+                    ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-300"
+                    : "border-rose-400/30 bg-rose-500/10 text-rose-300"
+                )}
+              >
+                <ShieldCheck className="h-7 w-7" />
+              </div>
+              <Badge tone={VERDICT_META[receipt.ruling.verdict].tone}>{VERDICT_META[receipt.ruling.verdict].label}</Badge>
+              <p className="mt-2 text-lg font-bold text-white">This dispute is settled (SIMULATED)</p>
+              <p className="mx-auto mt-1 max-w-md text-sm text-slate-400">{VERDICT_META[receipt.ruling.verdict].detail}</p>
+            </Card>
+          )}
           <ReceiptView receipt={receipt} />
         </div>
       ) : phase === "setup" ? (
-        /* ------- choose & start ------- */
+        /* ---------------- choose & start ---------------- */
         <Card className="p-5">
           <p className="text-sm font-bold text-white">Which adjudicator should rule?</p>
           <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
@@ -272,9 +319,9 @@ export default function VerifyPage() {
                 </span>
                 {mode === "simulated" && <CheckCircle2 className="h-4 w-4 text-violet-300" />}
               </div>
-              <p className="mt-2.5 text-sm font-semibold text-white">SIMULATED verification</p>
+              <p className="mt-2.5 text-sm font-semibold text-white">SIMULATED fallback</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                Transparent local rules model. Instant, deterministic — GenLayer validators are NOT contacted.
+                Transparent local rules model — instant and deterministic. GenLayer validators are NOT contacted.
               </p>
             </button>
 
@@ -293,13 +340,11 @@ export default function VerifyPage() {
                 </span>
                 {mode === "genlayer" && <CheckCircle2 className="h-4 w-4 text-cyan-300" />}
               </div>
-              <p className="mt-2.5 text-sm font-semibold text-white">
-                {isGenReady ? "REAL GenLayer verification" : "GENLAYER validators"}
-              </p>
+              <p className="mt-2.5 text-sm font-semibold text-white">GenLayer validators — live contract</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
                 {isGenReady
-                  ? `Actual validator consensus on ${glConfig.chainLabel} — submits a real on-chain transaction.`
-                  : "Not configured — deploy the contract and set NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS."}
+                  ? `Judge on the live Intelligent Contract (${glChainLabel}). Real validator consensus — not an in-app AI.`
+                  : "GenLayer is not configured."}
               </p>
             </button>
           </div>
@@ -309,19 +354,33 @@ export default function VerifyPage() {
               size="lg"
               block
               tone={mode === "simulated" ? "violet" : "cyan"}
-              onClick={() => begin(mode)}
-              disabled={mode === "genlayer" && !isGenReady}
+              onClick={mode === "simulated" ? runSimulated : adjudicateOnGenLayer}
             >
               {mode === "simulated" ? (
                 <>
-                  <FlaskConical className="h-4.5 w-4.5" /> Run SIMULATED verification
+                  <FlaskConical className="h-4.5 w-4.5" /> Run SIMULATED fallback
                 </>
               ) : (
                 <>
-                  <Cpu className="h-4.5 w-4.5" /> Submit to REAL GenLayer validators
+                  <Cpu className="h-4.5 w-4.5" /> Adjudicate on GenLayer validators
                 </>
               )}
             </Btn>
+
+            {mode === "genlayer" && (
+              <Btn size="lg" block tone="ghost" onClick={readSharedVerdict}>
+                Read the shared on-chain verdict <ExternalLink className="h-4 w-4" />
+              </Btn>
+            )}
+
+            {mode === "genlayer" && (
+              <p className="rounded-xl border border-cyan-400/15 bg-cyan-500/[0.04] px-3.5 py-2 text-[11px] leading-relaxed text-cyan-200/80">
+                Adjudicating sends <b>real transactions</b> to {glChainLabel} (contract{" "}
+                <span className="font-mono">{glContractAddr.slice(0, 10)}…</span>), signed server-side by
+                <span className="font-mono"> AGENTREF_ACCOUNT_PRIVATE_KEY</span>. The button below it reads whatever the
+                shared contract already holds — free, no wallet.
+              </p>
+            )}
             {freshChallenge && (
               <p className="text-center text-[11px] text-slate-500">
                 You are the buyer here — this will move the receipt to UNDER_REVIEW, then record a final ruling.
@@ -330,65 +389,71 @@ export default function VerifyPage() {
           </div>
         </Card>
       ) : phase === "running" ? (
-        /* ------- staged progress ------- */
+        /* ---------------- staged progress ---------------- */
         <Card className="p-5">
           <div className="flex items-center gap-2">
             <PulseDot tone={mode === "simulated" ? "violet" : "cyan"} />
             <p className="text-sm font-bold text-white">
-              {mode === "simulated" ? "SIMULATED verification — local rules model" : "REAL GenLayer verification — on-chain"}
+              {mode === "simulated"
+                ? "SIMULATED fallback — local rules model"
+                : step >= 2
+                  ? "Reading the verdict from GenLayer validators"
+                  : "Adjudicating on GenLayer validators — Testnet Bradbury"}
             </p>
           </div>
           <div className="mt-4 space-y-0">
-            {(mode === "simulated" ? SIM_STEPS : GL_STEPS).map((s, i) => (
-              <div key={i} className={cx("relative flex gap-3 pb-4 last:pb-0", i < (mode === "simulated" ? SIM_STEPS : GL_STEPS).length - 1 && "")}>
-                {i < (mode === "simulated" ? SIM_STEPS : GL_STEPS).length - 1 && (
-                  <span className="absolute left-[7px] top-5 h-full w-px bg-white/10" />
-                )}
-                <span className="mt-0.5">
-                  {i < step ? (
-                    <CheckCircle2 className="h-[15px] w-[15px] text-emerald-400" />
-                  ) : i === step ? (
-                    <LoaderCircle className="h-[15px] w-[15px] animate-spin text-violet-300" />
-                  ) : (
-                    <Circle className="h-[15px] w-[15px] text-slate-600" />
-                  )}
-                </span>
-                <div className={cx("min-w-0", i > step && "opacity-40")}>
-                  <p className="text-[13px] font-semibold text-slate-200">{s.title}</p>
-                  <p className="text-xs leading-relaxed text-slate-500">{s.detail}</p>
+            {(mode === "simulated" ? SIM_STEPS : GL_STEPS).map((s, i) => {
+              const steps = mode === "simulated" ? SIM_STEPS : GL_STEPS;
+              return (
+                <div key={i} className="relative flex gap-3 pb-4 last:pb-0">
+                  {i < steps.length - 1 && <span className="absolute left-[7px] top-5 h-full w-px bg-white/10" />}
+                  <span className="mt-0.5">
+                    {i < step ? (
+                      <CheckCircle2 className="h-[15px] w-[15px] text-emerald-400" />
+                    ) : i === step ? (
+                      <LoaderCircle className="h-[15px] w-[15px] animate-spin text-cyan-300" />
+                    ) : (
+                      <Circle className="h-[15px] w-[15px] text-slate-600" />
+                    )}
+                  </span>
+                  <div className={cx("min-w-0", i > step && "opacity-40")}>
+                    <p className="text-[13px] font-semibold text-slate-200">{s.title}</p>
+                    <p className="text-xs leading-relaxed text-slate-500">{s.detail}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
           {mode === "simulated" && (
             <p className="mt-3 rounded-xl border border-amber-400/15 bg-amber-500/[0.04] px-3.5 py-2 text-[11px] leading-relaxed text-amber-200/80">
-              Honesty note: the pacing is animated for the demo; the SIMULATED computation itself is instantaneous and
-              deterministic. GenLayer validators are never contacted on this path.
+              Honesty note: the pacing is animated for the demo; the SIMULATED computation itself is instantaneous. This
+              verdict is replaced by the real on-chain verdict the moment one is recorded.
             </p>
           )}
-          {mode === "genlayer" && isGenReady && (
+          {mode === "genlayer" && (
             <p className="mt-3 rounded-xl border border-cyan-400/15 bg-cyan-500/[0.04] px-3.5 py-2 text-[11px] leading-relaxed text-cyan-200/80">
-              This sends a REAL transaction to AgentRefAdjudicator on {glConfig.chainLabel}. No ruling is recorded
-              unless the validators finalize it; if finalization is slow, the transaction id is shown so you can
-              follow it on the explorer.
+              The judge here is <b>GenLayer validator consensus</b> on the live contract — no in-app AI. The ruling is
+              only recorded once <code className="font-mono text-[10px]">get_receipt()</code> reports a final Status.
             </p>
           )}
         </Card>
       ) : (
-        /* ------- error ------- */
+        /* ---------------- error ---------------- */
         <Card className="p-5 text-center">
           <p className="text-3xl">⚠️</p>
-          <p className="mt-2 text-base font-bold text-white">Verification did not complete</p>
-          <p className="mx-auto mt-1 max-w-md text-sm text-slate-400">{errorMsg}</p>
-          <div className="mt-4 flex justify-center gap-2">
+          <p className="mt-2 text-base font-bold text-white">The GenLayer adjudication did not complete</p>
+          <p className="mx-auto mt-1 max-w-md whitespace-pre-line text-sm text-slate-400">{errorMsg}</p>
+          <div className="mt-4 flex flex-wrap justify-center gap-2">
             <Btn tone="ghost" onClick={() => setPhase("setup")}>Back to choose</Btn>
+            <Btn tone="cyan" onClick={readSharedVerdict}>
+              Read the shared on-chain verdict instead
+            </Btn>
             <LinkBtn href={`/receipts/${receipt.id}`} tone="ghost">Open the record</LinkBtn>
           </div>
         </Card>
       )}
 
-      {/* small footer of currently settled demo scenarios */}
-      {receipt.ruling && (
+      {!receipt.ruling && (
         <div className="mt-2 flex items-center justify-between rounded-2xl border border-white/[0.06] bg-white/[0.02] px-4 py-3">
           <p className="text-xs text-slate-400">Want to judge another one?</p>
           <Link href="/" className="inline-flex items-center gap-1 text-xs font-semibold text-violet-300 hover:text-violet-200">
@@ -397,5 +462,95 @@ export default function VerifyPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+/** Step 06 — the on-chain verdict, front and centre. */
+function OnchainVerdictCard({ ruling, receiptId }: { ruling: Ruling; receiptId: string }) {
+  const positive = ruling.verdict === "PASS";
+  const status = ruling.genlayerStatus ?? (positive ? "VERIFIED" : "NOT_VERIFIED");
+  const Icon = positive ? ShieldCheck : XCircle;
+  return (
+    <Card className={cx("p-5", positive ? "border-emerald-400/20" : "border-rose-400/25")} glow={positive ? "pass" : "fail"}>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-center gap-3">
+          <div
+            className={cx(
+              "grid h-12 w-12 shrink-0 place-items-center rounded-2xl border",
+              positive ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-300" : "border-rose-400/30 bg-rose-500/10 text-rose-300"
+            )}
+          >
+            <Icon className="h-6 w-6" />
+          </div>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge tone={positive ? "pass" : "fail"}>{status}</Badge>
+              <Badge tone="violet">GENLAYER</Badge>
+            </div>
+            <p className="mt-1 text-base font-bold text-white">
+              {positive ? "The work verified on-chain." : "The work did not verify on-chain."}
+            </p>
+          </div>
+        </div>
+        <div className="text-left sm:text-right">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wider text-slate-500">Ruled by</p>
+          <p className="text-[13px] font-medium text-slate-200">GenLayer validators</p>
+        </div>
+      </div>
+
+      <p className="mt-3 rounded-xl border border-violet-400/20 bg-violet-500/[0.06] px-3.5 py-2 text-xs leading-relaxed text-violet-200/90">
+        Read from the live Intelligent Contract on {LIVE_CONTRACT.chainLabel}. Judged by GenLayer validators — no in-app AI.
+        {!ruling.explorerUrl && " This is the most recent adjudication held by the shared contract."}
+      </p>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+        {ruling.genlayerScore && (
+          <div className="rounded-xl border border-white/[0.06] bg-base-900/50 px-3.5 py-2.5">
+            <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-slate-500">Validator score</p>
+            <p className="mt-0.5 font-mono text-base font-bold text-white">{ruling.genlayerScore}</p>
+          </div>
+        )}
+        <div className="rounded-xl border border-white/[0.06] bg-base-900/50 px-3.5 py-2.5">
+          <p className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-slate-500">On-chain status</p>
+          <p className="mt-0.5 text-sm font-semibold text-white">{status}</p>
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <p className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-slate-500">Validator reason</p>
+        <p className="preserve-breaks rounded-xl bg-base-900/60 px-3.5 py-2.5 text-sm leading-relaxed text-slate-200">
+          {ruling.reasoning || "The validators returned no written reason."}
+        </p>
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-white/[0.06] pt-3.5">
+        {ruling.explorerUrl && (
+          <a
+            href={ruling.explorerUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs font-semibold text-cyan-200 underline-offset-2 hover:underline"
+          >
+            View the adjudication transaction <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        )}
+        <a
+          href={explorerTxUrl(LIVE_CONTRACT.deployTxHash)}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 underline-offset-2 hover:text-cyan-200 hover:underline"
+        >
+          Contract deploy on the explorer <ExternalLink className="h-3.5 w-3.5" />
+        </a>
+        {ruling.contractAddress && (
+          <span className="font-mono text-[10.5px] text-slate-500">contract {ruling.contractAddress.slice(0, 10)}…{ruling.contractAddress.slice(-6)}</span>
+        )}
+        <LinkBtn href={`/receipts/${receiptId}`} tone="ghost" className="ml-auto">
+          Open the full record <ArrowRight className="h-4 w-4" />
+        </LinkBtn>
+      </div>
+    </Card>
   );
 }

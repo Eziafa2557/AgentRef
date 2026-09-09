@@ -60,21 +60,25 @@ test("disclosing the downside risk satisfies the risk requirement", () => {
 });
 
 test("seed corpus drives the intended verdicts", () => {
-  const [pass, fail, risk] = buildDemoReceipts();
+  const all = buildDemoReceipts();
+  const bySeed = (seedId: string) => all.find((r) => r.seedId === seedId)!;
+  const pass = bySeed("seed-pass");
   const passA = analyzeCorpus(pass);
   assert.equal(passA.verdict, "PASS", passA.reasoning);
 
+  const fail = bySeed("seed-fail");
   const failA = analyzeCorpus(fail);
   assert.equal(failA.verdict, "FAIL", failA.reasoning);
   assert.ok(failA.violated.some((v) => /leverage|derivatives/i.test(v)));
 
+  const risk = bySeed("seed-material-risk");
   const riskA = analyzeCorpus(risk);
   assert.equal(riskA.verdict, "PASS_WITH_MATERIAL_RISK", riskA.reasoning);
   assert.equal(riskA.missedRisks.length, 1);
 });
 
 test("simulateRuling marks the source simulated and references real evidence", () => {
-  let r = buildDemoReceipts()[1]; // FAIL seed
+  let r = buildDemoReceipts().find((x) => x.seedId === "seed-fail")!; // FAIL seed
   r = challengeReceipt(r, {
     reason: "leverage recommended",
     violatedRequirements: ["Do not recommend leverage or derivatives of any kind."],

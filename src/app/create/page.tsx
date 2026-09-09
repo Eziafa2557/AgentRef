@@ -6,6 +6,7 @@ import { Suspense, useMemo, useState } from "react";
 import { useAgentRef } from "@/lib/agentref-provider";
 import { Btn, Card, Field, Label, inputCls } from "@/components/ui";
 import { DEMO_SEEDS } from "@/core/seeds";
+import { Journey } from "@/components/journey";
 
 function lines(s: string): string[] {
   return s
@@ -71,6 +72,7 @@ function CreateInner() {
 
   return (
     <div className="flex flex-col gap-5">
+      <Journey step={2} accent="violet" />
       <div>
         <div className="flex items-center gap-2 text-violet-300">
           <ReceiptText className="h-5 w-5" />
@@ -192,8 +194,9 @@ function CreateInner() {
 
           <p className="flex items-start gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] px-3.5 py-2.5 text-[11px] leading-relaxed text-slate-500">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            Minting hashes the material locally and holds escrow in a simulated state. No wallet, no chain, no real money
-            — the record is designed to be challenged and ruled on right here.
+            Minting hashes the material locally and holds escrow in a simulated state. No wallet is needed to mint. If a
+            dispute is raised later, it can be judged by the transparent local model or — for real — by GenLayer
+            validators on Testnet Bradbury.
           </p>
         </div>
       </Card>

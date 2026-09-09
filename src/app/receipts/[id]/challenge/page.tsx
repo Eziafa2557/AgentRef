@@ -8,6 +8,7 @@ import { useAgentRef } from "@/lib/agentref-provider";
 import { Btn, Card, Chip, Field, Label, LinkBtn, inputCls } from "@/components/ui";
 import { suggestedChallengeFor } from "@/core/seeds";
 import type { ChallengeInput } from "@/core/challenge";
+import { Journey } from "@/components/journey";
 
 export default function ChallengePage() {
   const params = useParams<{ id: string }>();
@@ -99,6 +100,7 @@ export default function ChallengePage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <Journey step={4} accent="amber" />
       <Link href={`/receipts/${receipt.id}`} className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-slate-200">
         <ArrowLeft className="h-3.5 w-3.5" /> Back to receipt
       </Link>

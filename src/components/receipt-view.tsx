@@ -15,6 +15,7 @@ import {
   ChevronRight,
   CircleDashed,
   Copy,
+  ExternalLink,
   FileText,
   Fingerprint,
   Gavel,
@@ -30,6 +31,8 @@ import { canChallenge } from "@/core/receipt";
 import { Badge, Card, Mono, cx } from "@/components/ui";
 import { SETTLE_META, VERDICT_META } from "@/lib/labels";
 import { fmtTime, shortKey, sourceLabel } from "@/lib/format";
+import { LIVE_CONTRACT, explorerTxUrl } from "@/core/genlayer/contract";
+import type { BadgeTone } from "@/components/ui";
 
 const DOT: Record<SettlementState, string> = {
   PENDING: "bg-slate-400",
@@ -46,6 +49,14 @@ const VERDICT_TONE = {
   FAIL: "text-rose-300 border-rose-400/30 bg-rose-500/10",
   PASS_WITH_MATERIAL_RISK: "text-orange-300 border-orange-400/30 bg-orange-500/10",
 } as const;
+
+/** Tone a live on-chain Status pill (e.g. NOT_VERIFIED) by its meaning. */
+function onchainStatusTone(status?: string): BadgeTone {
+  const s = (status ?? "").toUpperCase();
+  if (/NOT_VERIFIED|FAIL|REJECT/.test(s)) return "fail";
+  if (/VERIFIED|PASS|ACCEPT/.test(s)) return "pass";
+  return "neutral";
+}
 
 export function ReceiptView({
   receipt: r,
@@ -438,6 +449,7 @@ function RulingBlock({ r }: { r: Receipt }) {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge tone={meta.tone}>{meta.label}</Badge>
+              {ruling.genlayerStatus && <Badge tone={onchainStatusTone(ruling.genlayerStatus)}>{ruling.genlayerStatus}</Badge>}
               <Badge tone={ruling.source === "genlayer" ? "violet" : "neutral"}>
                 {sLabel.short}
               </Badge>
@@ -461,9 +473,37 @@ function RulingBlock({ r }: { r: Receipt }) {
         )}
       >
         {ruling.source === "genlayer"
-          ? "This ruling was produced by GenLayer validator consensus and read from the on-chain record."
+          ? "Judged by GenLayer validators on Testnet Bradbury — this verdict was read from the live on-chain record. No in-app AI was consulted."
           : `${sLabel.full}. This verdict came from AgentRef's transparent local model so the full flow can run without a network.`}
       </p>
+
+      {/* live on-chain record (source: genlayer) */}
+      {ruling.source === "genlayer" && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-cyan-400/15 bg-cyan-500/[0.04] px-3.5 py-2.5">
+          <span className="text-[10.5px] font-semibold uppercase tracking-[0.14em] text-cyan-300/80">
+            On-chain record
+          </span>
+          {ruling.genlayerScore && <span className="font-mono text-xs text-cyan-100">Score {ruling.genlayerScore}</span>}
+          {ruling.explorerUrl && (
+            <a
+              href={ruling.explorerUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-cyan-200 underline-offset-2 hover:underline"
+            >
+              View the adjudication transaction on the explorer <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+          <a
+            href={explorerTxUrl(LIVE_CONTRACT.deployTxHash)}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 underline-offset-2 hover:text-cyan-200 hover:underline"
+          >
+            Contract deploy <ExternalLink className="h-3 w-3" />
+          </a>
+        </div>
+      )}
 
       <div className="mt-4 grid gap-4">
         <div>
@@ -508,7 +548,11 @@ function RulingBlock({ r }: { r: Receipt }) {
         {ruling.transactionHash && <Prov k="Transaction" v={shortKey(ruling.transactionHash, 10, 6)} />}
         {ruling.contractAddress && <Prov k="Contract" v={shortKey(ruling.contractAddress, 10, 4)} />}
         {ruling.finalizedRound !== undefined && <Prov k="Finalized round" v={String(ruling.finalizedRound)} />}
-        <Prov k="Flags" v={briefFollowedLabels(ruling)} />
+        {ruling.source === "genlayer"
+          ? ruling.genlayerScore
+            ? <Prov k="Score" v={ruling.genlayerScore} />
+            : null
+          : <Prov k="Flags" v={briefFollowedLabels(ruling)} />}
       </div>
     </Card>
   );

@@ -103,6 +103,12 @@ export interface Ruling {
   contractAddress?: string;
   /** Latest finalized block/round the ruling was read at. */
   finalizedRound?: number;
+  /** Live contract's own Status text (e.g. "NOT_VERIFIED") — source === "genlayer". */
+  genlayerStatus?: string;
+  /** Raw Score text returned by the live contract, if any. */
+  genlayerScore?: string;
+  /** Explorer link for the adjudication transaction, when known. */
+  explorerUrl?: string;
 }
 
 /* ------------------------------------------------------------------ */

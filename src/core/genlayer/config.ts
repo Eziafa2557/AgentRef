@@ -1,21 +1,24 @@
 /**
  * GenLayer wiring config.
  *
- * AgentRef runs WITHOUT any GenLayer credentials out of the box: the app uses
- * the transparently-labelled SIMULATED adjudicator (src/core/evaluate.ts) until
- * a contract is deployed and these variables are provided. When they are set,
- * the server-side runtime (./runtime.ts) uses the real genlayer-js client — and
- * the UI labels rulings source: "genlayer".
+ * AgentRef ships pointing AT THE LIVE deployed Intelligent Contract on GenLayer
+ * Testnet — Bradbury (src/core/genlayer/contract.ts → LIVE_CONTRACT). The
+ * address is public, so the config is `ready` out of the box and READING the
+ * on-chain verdict needs no wallet or key.
+ *
+ * ADJUDICATING (create_receipt → challenge → adjudicate, i.e. writes) needs a
+ * funded account server-side, set in env only:
+ *   AGENTREF_ACCOUNT_PRIVATE_KEY   server-only signer key (never exposed)
  *
  * Env reference (see .env.example):
- *   NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS   deployed AgentRefAdjudicator address
+ *   NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS   overrides the default live address
  *   NEXT_PUBLIC_AGENTREF_NETWORK            testnet_bradbury | studionet | localnet | testnet_asimov
  *   NEXT_PUBLIC_AGENTREF_CHAIN_KEY          OPTIONAL explicit genlayer-js/chains export name
  *                                           (testnetBradbury). Defaults to the export that matches
  *                                           the network above.
- *   AGENTREF_ACCOUNT_PRIVATE_KEY            server-only signer key (never exposed)
  */
 import type { GenLayerConfigStatus } from "../types";
+import { LIVE_CONTRACT } from "./contract";
 
 const has = (v?: string): boolean => !!v && v.trim().length > 0;
 
@@ -59,18 +62,11 @@ export function getGenLayerConfig(): GenLayerConfigStatus {
   const address =
     process.env.NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS?.trim() ||
     serverEnv()?.AGENTREF_CONTRACT_ADDRESS?.trim() ||
-    "";
-  if (!has(address)) {
-    return {
-      kind: "not-configured",
-      reason:
-        "No AgentRefAdjudicator address is configured. Deploy genlayer/contract.py, then set NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS (see genlayer/README.md and .env.example).",
-    };
-  }
+    LIVE_CONTRACT.address;
   const network =
     process.env.NEXT_PUBLIC_AGENTREF_NETWORK?.trim() ||
     serverEnv()?.AGENTREF_NETWORK?.trim() ||
-    "testnet_bradbury";
+    LIVE_CONTRACT.network;
   const chainKey = resolveChainKey(network, process.env.NEXT_PUBLIC_AGENTREF_CHAIN_KEY);
   return {
     kind: "ready",

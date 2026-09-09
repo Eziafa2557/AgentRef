@@ -26,6 +26,35 @@ export interface SeedScenario {
 
 export const DEMO_SEEDS: SeedScenario[] = [
   {
+    seedId: "seed-genlayer-tvl",
+    title: "Live GenLayer demo — TVL research (expects NOT_VERIFIED)",
+    briefTitle: "Top 5 DeFi protocols by TVL",
+    brief: "Research the top 5 DeFi protocols by TVL and compare them using current data.",
+    requirements: ["Compare the top 5 DeFi protocols by TVL using current data."],
+    riskRequirements: [],
+    agentName: "Orbit Research AI",
+    requesterName: "Ledgerline Capital",
+    workTitle: "Top DeFi protocols by TVL — comparison",
+    work:
+      "The largest DeFi protocols by total value locked are a mix of liquid-staking platforms, major lending markets and a handful of decentralised exchanges. Size tends to concentrate in a few ecosystems that won the last cycle. Protocols with more value locked usually offer deeper liquidity and are seen as more battle-tested, which is why TVL is watched as a health metric.",
+    paymentAmountUsd: 2500,
+    suggested: {
+      reason: "TVL figures outdated.",
+      violatedRequirements: ["Compare the top 5 DeFi protocols by TVL using current data."],
+      missedRiskRequirements: [],
+      additionalContext:
+        "The work never names a single protocol or a single current TVL figure, so nothing here can be verified against current data.",
+      challengerName: "Ledgerline QA (demo)",
+      evidence: [
+        {
+          label: "Work excerpt",
+          content:
+            "The largest DeFi protocols by total value locked are a mix of liquid-staking platforms, major lending markets and a handful of decentralised exchanges.",
+        },
+      ],
+    },
+  },
+  {
     seedId: "seed-pass",
     title: "Passes the brief",
     briefTitle: "Six-month ETH holding analysis",
