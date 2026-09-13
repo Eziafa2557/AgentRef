@@ -10,7 +10,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { getGenLayerAccount, getGenLayerConfig, resolveChainKey } from "./config";
+import { adjudicationCapability, getGenLayerAccount, getGenLayerConfig, resolveChainKey } from "./config";
 import { LIVE_CONTRACT } from "./contract";
 // Importing runtime.ts is the real import check: it statically imports
 // genlayer-js@1.1.8 + its chains + types. If those resolved names were wrong,
@@ -100,6 +100,36 @@ describe("getGenLayerAccount (no env)", () => {
       const account = getGenLayerAccount();
       assert.equal(account.privateKey, undefined);
       assert.equal(account.accountName, "agentref");
+    } finally {
+      restoreGenLayerEnv(saved);
+    }
+  });
+});
+
+describe("adjudicationCapability", () => {
+  it("reports the WRITE path unavailable without a signer key, and says why", () => {
+    const cap = adjudicationCapability({ accountName: "agentref" });
+    assert.equal(cap.canAdjudicate, false);
+    assert.match(cap.reason, /AGENTREF_ACCOUNT_PRIVATE_KEY/);
+  });
+
+  it("rejects a malformed key rather than attempting to sign with it", () => {
+    const cap = adjudicationCapability({ accountName: "agentref", privateKey: "not-a-key" });
+    assert.equal(cap.canAdjudicate, false);
+    assert.match(cap.reason, /64-hex/);
+  });
+
+  it("reports the WRITE path available for a well-formed 64-hex key", () => {
+    const cap = adjudicationCapability({ accountName: "agentref", privateKey: `0x${"a".repeat(64)}` });
+    assert.equal(cap.canAdjudicate, true);
+  });
+
+  it("follows server env — no key means the app must run the fallback", () => {
+    const saved = clearGenLayerEnv();
+    try {
+      assert.equal(adjudicationCapability().canAdjudicate, false);
+      process.env.AGENTREF_ACCOUNT_PRIVATE_KEY = `0x${"b".repeat(64)}`;
+      assert.equal(adjudicationCapability().canAdjudicate, true);
     } finally {
       restoreGenLayerEnv(saved);
     }

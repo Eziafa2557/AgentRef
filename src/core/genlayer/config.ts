@@ -93,3 +93,36 @@ export function getGenLayerAccount(): GenLayerAccount {
     accountName: env?.AGENTREF_ACCOUNT_NAME?.trim() || "agentref",
   };
 }
+
+export interface AdjudicationCapability {
+  /** True only when the app can SIGN create_receipt → challenge → adjudicate. */
+  canAdjudicate: boolean;
+  /** Short, user-facing explanation — safe to show in the UI (no secrets). */
+  reason: string;
+}
+
+const PRIVATE_KEY_RE = /^0x[0-9a-fA-F]{64}$/;
+
+/**
+ * Whether the app can run the WRITE path. Reading the on-chain verdict is
+ * always possible (the contract address is public); signing the three writes
+ * needs a funded server-side key, so without one the app must fall back to the
+ * SIMULATED adjudicator rather than dead-end. Pure and inspectable.
+ */
+export function adjudicationCapability(account: GenLayerAccount = getGenLayerAccount()): AdjudicationCapability {
+  const key = account.privateKey?.trim();
+  if (!key) {
+    return {
+      canAdjudicate: false,
+      reason:
+        "This deployment has no signer key (AGENTREF_ACCOUNT_PRIVATE_KEY), so it cannot sign the on-chain writes.",
+    };
+  }
+  if (!PRIVATE_KEY_RE.test(key)) {
+    return {
+      canAdjudicate: false,
+      reason: "AGENTREF_ACCOUNT_PRIVATE_KEY is not a 0x-prefixed 64-hex private key.",
+    };
+  }
+  return { canAdjudicate: true, reason: "A server-side signer key is configured." };
+}

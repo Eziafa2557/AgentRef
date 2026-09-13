@@ -38,8 +38,15 @@ live GenLayer path builds one from the flat `get_receipt()` record
 | Where | `src/core/evaluate.ts` | live Bradbury contract via `src/core/genlayer/runtime.ts` |
 | Who decides | transparent local rules model | GenLayer validators on Testnet — Bradbury |
 | `Ruling.source` | `"simulated"` | `"genlayer"` |
-| Labelled in UI | `SIMULATED fallback` | `GENLAYER` + on-chain `Status` / `Score` / `Reason` |
+| Labelled in UI | `Simulated fallback` | `GENLAYER` + on-chain `Status` / `Score` / `Reason` |
 | Needs | nothing | reads: nothing · writes: `AGENTREF_ACCOUNT_PRIVATE_KEY` (funded) |
+
+**Which one runs:** `/api/genlayer/status` exposes `canAdjudicate`
+(`adjudicationCapability()` in `config.ts`) — a boolean derived from server env.
+Without a signer key the verify page defaults to the labelled fallback and
+disables the GenLayer write button with the reason attached, so the demo always
+completes instead of dead-ending; the read-only on-chain path stays available.
+The key never crosses to the client.
 
 **Honesty rule:** consensus is never faked. The SIMULATED path never claims to
 contact validators; the GENLAYER path never runs without the live contract, and

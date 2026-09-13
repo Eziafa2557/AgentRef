@@ -27,7 +27,7 @@ export interface SeedScenario {
 export const DEMO_SEEDS: SeedScenario[] = [
   {
     seedId: "seed-genlayer-tvl",
-    title: "Live GenLayer demo — TVL research (expects NOT_VERIFIED)",
+    title: "Disputed TVL research — weak delivery (demo)",
     briefTitle: "Top 5 DeFi protocols by TVL",
     brief: "Research the top 5 DeFi protocols by TVL and compare them using current data.",
     requirements: ["Compare the top 5 DeFi protocols by TVL using current data."],
@@ -36,7 +36,7 @@ export const DEMO_SEEDS: SeedScenario[] = [
     requesterName: "Ledgerline Capital",
     workTitle: "Top DeFi protocols by TVL — comparison",
     work:
-      "The largest DeFi protocols by total value locked are a mix of liquid-staking platforms, major lending markets and a handful of decentralised exchanges. Size tends to concentrate in a few ecosystems that won the last cycle. Protocols with more value locked usually offer deeper liquidity and are seen as more battle-tested, which is why TVL is watched as a health metric.",
+      "Decentralised finance has grown into one of the most active corners of the market, with activity spread across lending, trading and staking. The sector moves in cycles and sentiment can shift quickly. A careful allocator should keep an eye on how the space evolves and revisit the picture regularly rather than relying on any single snapshot.",
     paymentAmountUsd: 2500,
     suggested: {
       reason: "TVL figures outdated.",
@@ -49,7 +49,7 @@ export const DEMO_SEEDS: SeedScenario[] = [
         {
           label: "Work excerpt",
           content:
-            "The largest DeFi protocols by total value locked are a mix of liquid-staking platforms, major lending markets and a handful of decentralised exchanges.",
+            "Decentralised finance has grown into one of the most active corners of the market, with activity spread across lending, trading and staking.",
         },
       ],
     },

@@ -75,6 +75,14 @@ test("seed corpus drives the intended verdicts", () => {
   const riskA = analyzeCorpus(risk);
   assert.equal(riskA.verdict, "PASS_WITH_MATERIAL_RISK", riskA.reasoning);
   assert.equal(riskA.missedRisks.length, 1);
+
+  // The GenLayer demo seed is genuinely deficient: it never names a protocol or
+  // a current TVL figure, so the disputed delivery must fail here too — the
+  // fallback and the live validators should agree on this one.
+  const tvl = bySeed("seed-genlayer-tvl");
+  const tvlA = analyzeCorpus(tvl);
+  assert.equal(tvlA.verdict, "FAIL", tvlA.reasoning);
+  assert.equal(tvlA.violated.length, 1);
 });
 
 test("simulateRuling marks the source simulated and references real evidence", () => {

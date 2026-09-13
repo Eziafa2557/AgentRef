@@ -15,7 +15,7 @@ import {
   ShieldCheck,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAgentRef } from "@/lib/agentref-provider";
 import { Badge, Btn, Card, LinkBtn, PulseDot, cx } from "@/components/ui";
 import { simulateRuling } from "@/core/evaluate";
@@ -31,7 +31,7 @@ type Phase = "setup" | "running" | "done" | "error";
 
 const SIM_STEPS = [
   { title: "Snapshot the dispute corpus", detail: "Builds the exact payload the adjudicator will see — brief, requirements, work, challenge and hashed evidence." },
-  { title: "SIMULATED — local rules model (fallback)", detail: "GenLayer validators are NOT contacted. A transparent, inspectable model checks each requirement against the work so the flow still runs without a funded key." },
+  { title: "Simulated fallback — local rules model", detail: "GenLayer validators are NOT contacted. A transparent, inspectable model checks each requirement against the work so the flow still runs without a funded key." },
   { title: "Record the ruling", detail: "Persists the verdict on the receipt and advances the escrow state machine." },
 ];
 
@@ -51,10 +51,40 @@ export default function VerifyPage() {
   const isGenReady = glConfig.kind === "ready";
   const glChainLabel = glConfig.kind === "ready" ? glConfig.chainLabel : LIVE_CONTRACT.chainLabel;
   const glContractAddr = glConfig.kind === "ready" ? glConfig.contractAddress : LIVE_CONTRACT.address;
-  const [mode, setMode] = useState<Mode>(isGenReady ? "genlayer" : "simulated");
+
+  /* The WRITE path (create_receipt → challenge → adjudicate) is signed by a
+     server-side key. Until we know whether this deployment has one, start on
+     the SIMULATED fallback so the demo never dead-ends on a missing key. */
+  const [writesReady, setWritesReady] = useState<boolean | null>(null);
+  const userChose = useRef(false);
+  const [mode, setMode] = useState<Mode>("simulated");
   const [phase, setPhase] = useState<Phase>("setup");
   const [step, setStep] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/genlayer/status")
+      .then((r) => r.json())
+      .then((s: { canAdjudicate?: boolean }) => {
+        if (!alive) return;
+        const can = s.canAdjudicate === true;
+        setWritesReady(can);
+        if (can && !userChose.current) setMode("genlayer");
+      })
+      .catch(() => {
+        if (alive) setWritesReady(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const writesAvailable = writesReady === true;
+  const pickMode = (m: Mode) => {
+    userChose.current = true;
+    setMode(m);
+  };
 
   const sleep = (ms: number) => new Promise<void>((res) => setTimeout(res, ms));
   const freshChallenge = !!receipt?.challenge && !receipt?.ruling;
@@ -65,7 +95,7 @@ export default function VerifyPage() {
     const cur = getReceipt(id);
     if (!cur?.challenge || cur.ruling) return;
     setErrorMsg(null);
-    setMode("simulated");
+    pickMode("simulated");
     setPhase("running");
     setStep(0);
     for (let i = 0; i < SIM_STEPS.length; i++) {
@@ -89,7 +119,7 @@ export default function VerifyPage() {
     const cur = getReceipt(id);
     if (!cur?.challenge || cur.ruling) return;
     setErrorMsg(null);
-    setMode("genlayer");
+    pickMode("genlayer");
     setPhase("running");
     setStep(0);
 
@@ -175,7 +205,7 @@ export default function VerifyPage() {
     const cur = getReceipt(id);
     if (!cur?.challenge || cur.ruling) return;
     setErrorMsg(null);
-    setMode("genlayer");
+    pickMode("genlayer");
     setPhase("running");
     setStep(1);
     let ro: { status: string; message?: string; note?: string; record?: OnchainReceiptRecord; contractAddress?: string };
@@ -266,9 +296,9 @@ export default function VerifyPage() {
             </>
           ) : (
             <>
-              <span className="font-semibold text-violet-200/90">SIMULATED fallback</span> — a transparent local model
-              judges this dispute. GenLayer validators are <em>not</em> contacted, and the verdict is labelled SIMULATED.
-              Once a real on-chain verdict is shown, this fallback is hidden.
+              <span className="font-semibold text-violet-200/90">Simulated fallback</span> — a transparent local model
+              judges this dispute. GenLayer validators are <em>not</em> contacted, and the verdict is labelled as a
+              Simulated fallback. Once a real on-chain verdict is shown, this fallback is hidden.
             </>
           )}
         </p>
@@ -295,8 +325,14 @@ export default function VerifyPage() {
                 <ShieldCheck className="h-7 w-7" />
               </div>
               <Badge tone={VERDICT_META[receipt.ruling.verdict].tone}>{VERDICT_META[receipt.ruling.verdict].label}</Badge>
-              <p className="mt-2 text-lg font-bold text-white">This dispute is settled (SIMULATED)</p>
-              <p className="mx-auto mt-1 max-w-md text-sm text-slate-400">{VERDICT_META[receipt.ruling.verdict].detail}</p>
+              <p className="mt-2 text-lg font-bold text-white">This dispute is settled by the Simulated fallback</p>
+              <p className="mx-auto mt-1 max-w-md text-sm text-slate-400">
+                {VERDICT_META[receipt.ruling.verdict].detail}
+              </p>
+              <p className="mx-auto mt-2 max-w-md rounded-xl border border-amber-400/15 bg-amber-500/[0.05] px-3.5 py-2 text-[11px] leading-relaxed text-amber-200/80">
+                No GenLayer validator was consulted for this verdict — it came from AgentRef&apos;s transparent local
+                model. The live GenLayer path stays integrated and takes over the moment a signer key is configured.
+              </p>
             </Card>
           )}
           <ReceiptView receipt={receipt} />
@@ -304,10 +340,17 @@ export default function VerifyPage() {
       ) : phase === "setup" ? (
         /* ---------------- choose & start ---------------- */
         <Card className="p-5">
-          <p className="text-sm font-bold text-white">Which adjudicator should rule?</p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-bold text-white">Which adjudicator should rule?</p>
+            {writesReady === false && (
+              <span className="rounded-full border border-violet-400/25 bg-violet-500/10 px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-violet-200">
+                Fallback active
+              </span>
+            )}
+          </div>
           <div className="mt-3 grid gap-2.5 sm:grid-cols-2">
             <button
-              onClick={() => setMode("simulated")}
+              onClick={() => pickMode("simulated")}
               className={cx(
                 "rounded-2xl border p-4 text-left transition-all",
                 mode === "simulated" ? "border-violet-400/50 bg-violet-500/10 shadow-glow" : "border-white/10 bg-white/[0.02] hover:border-white/20"
@@ -319,19 +362,24 @@ export default function VerifyPage() {
                 </span>
                 {mode === "simulated" && <CheckCircle2 className="h-4 w-4 text-violet-300" />}
               </div>
-              <p className="mt-2.5 text-sm font-semibold text-white">SIMULATED fallback</p>
+              <p className="mt-2.5 text-sm font-semibold text-white">Simulated fallback</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
                 Transparent local rules model — instant and deterministic. GenLayer validators are NOT contacted.
+                {writesReady !== true && (
+                  <span className="mt-1 block font-semibold text-violet-300/90">
+                    Recommended here — this deployment has no signer key.
+                  </span>
+                )}
               </p>
             </button>
 
             <button
-              onClick={() => setMode("genlayer")}
-              disabled={!isGenReady}
+              onClick={() => pickMode("genlayer")}
+              disabled={!isGenReady || !writesAvailable}
               className={cx(
                 "rounded-2xl border p-4 text-left transition-all",
                 mode === "genlayer" ? "border-cyan-400/50 bg-cyan-500/10 shadow-glow-cyan" : "border-white/10 bg-white/[0.02] hover:border-white/20",
-                !isGenReady && "cursor-not-allowed opacity-60"
+                (!isGenReady || !writesAvailable) && "cursor-not-allowed opacity-60"
               )}
             >
               <div className="flex items-center justify-between">
@@ -342,23 +390,34 @@ export default function VerifyPage() {
               </div>
               <p className="mt-2.5 text-sm font-semibold text-white">GenLayer validators — live contract</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
-                {isGenReady
-                  ? `Judge on the live Intelligent Contract (${glChainLabel}). Real validator consensus — not an in-app AI.`
-                  : "GenLayer is not configured."}
+                {!isGenReady
+                  ? "GenLayer is not configured."
+                  : writesAvailable
+                    ? `Judge on the live Intelligent Contract (${glChainLabel}). Real validator consensus — not an in-app AI.`
+                    : "Wired to the live contract, but signing the writes needs a server key (AGENTREF_ACCOUNT_PRIVATE_KEY) that this deployment does not have."}
               </p>
             </button>
           </div>
+
+          {writesReady === false && (
+            <p className="mt-3 rounded-xl border border-violet-400/15 bg-violet-500/[0.05] px-3.5 py-2 text-[11px] leading-relaxed text-violet-200/85">
+              The live GenLayer path is fully integrated and stays in the app — it is only switched off because this
+              deployment has no funded signer key. Everything below runs on the <b>Simulated fallback</b>, and every
+              verdict is labelled as such. Nothing here is claimed to be a GenLayer validator verdict.
+            </p>
+          )}
 
           <div className="mt-5 flex flex-col gap-2">
             <Btn
               size="lg"
               block
               tone={mode === "simulated" ? "violet" : "cyan"}
+              disabled={mode === "genlayer" && !writesAvailable}
               onClick={mode === "simulated" ? runSimulated : adjudicateOnGenLayer}
             >
               {mode === "simulated" ? (
                 <>
-                  <FlaskConical className="h-4.5 w-4.5" /> Run SIMULATED fallback
+                  <FlaskConical className="h-4.5 w-4.5" /> Run Simulated fallback
                 </>
               ) : (
                 <>
@@ -395,7 +454,7 @@ export default function VerifyPage() {
             <PulseDot tone={mode === "simulated" ? "violet" : "cyan"} />
             <p className="text-sm font-bold text-white">
               {mode === "simulated"
-                ? "SIMULATED fallback — local rules model"
+                ? "Simulated fallback — local rules model"
                 : step >= 2
                   ? "Reading the verdict from GenLayer validators"
                   : "Adjudicating on GenLayer validators — Testnet Bradbury"}
@@ -441,13 +500,24 @@ export default function VerifyPage() {
         /* ---------------- error ---------------- */
         <Card className="p-5 text-center">
           <p className="text-3xl">⚠️</p>
-          <p className="mt-2 text-base font-bold text-white">The GenLayer adjudication did not complete</p>
+          <p className="mt-2 text-base font-bold text-white">
+            {mode === "simulated" ? "The Simulated fallback did not complete" : "The GenLayer adjudication did not complete"}
+          </p>
           <p className="mx-auto mt-1 max-w-md whitespace-pre-line text-sm text-slate-400">{errorMsg}</p>
           <div className="mt-4 flex flex-wrap justify-center gap-2">
-            <Btn tone="ghost" onClick={() => setPhase("setup")}>Back to choose</Btn>
-            <Btn tone="cyan" onClick={readSharedVerdict}>
-              Read the shared on-chain verdict instead
+            {mode === "genlayer" && (
+              <Btn tone="violet" onClick={runSimulated}>
+                <FlaskConical className="h-4 w-4" /> Run the Simulated fallback instead
+              </Btn>
+            )}
+            <Btn tone="ghost" onClick={() => setPhase("setup")}>
+              Back to choose
             </Btn>
+            {mode === "genlayer" && (
+              <Btn tone="cyan" onClick={readSharedVerdict}>
+                Read the shared on-chain verdict instead
+              </Btn>
+            )}
             <LinkBtn href={`/receipts/${receipt.id}`} tone="ghost">Open the record</LinkBtn>
           </div>
         </Card>

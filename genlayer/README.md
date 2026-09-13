@@ -31,9 +31,9 @@ browser (verify page)                        Node server (route handlers)
 | File | Purpose |
 | --- | --- |
 | `src/core/genlayer/contract.ts` | **Pure** model of the live contract: `LIVE_CONTRACT`, `parseReceiptLine` (the exact `get_receipt()` format), `verdictForStatus`, `onchainRuling`. Unit-tested offline. |
-| `src/core/genlayer/config.ts` | Client-safe env → `ready`, defaulting to `LIVE_CONTRACT` (address + network). |
+| `src/core/genlayer/config.ts` | Client-safe env → `ready`, defaulting to `LIVE_CONTRACT` (address + network). Also `adjudicationCapability()` — the pure check for whether this deployment can sign writes at all. |
 | `src/core/genlayer/runtime.ts` | **Server-only** real SDK calls: `adjudicateOnChain` (writes) and `readOnChainReceipt` (free read). |
-| `src/app/api/genlayer/{adjudicate,receipt}/route.ts` | HTTP bridge so the client never touches the SDK or the key. |
+| `src/app/api/genlayer/{adjudicate,receipt,status}/route.ts` | HTTP bridge so the client never touches the SDK or the key. `status` reports *whether* writes are possible — never the key. |
 
 `genlayer-js@1.1.8` is a real, pinned dependency (see `package.json`) and is
 imported only by `runtime.ts`. Because `runtime.ts` is server-only, its static
@@ -54,6 +54,21 @@ The SIMULATED path exists only so the whole flow still runs on a deploy without
 a funded key. **The moment an on-chain verdict is shown it replaces/hides the
 SIMULATED result**, and the receipt records the GenLayer Status, Score, Reason,
 the adjudication transaction and an explorer link.
+
+## Which path a deployment actually runs
+
+The verify page asks `/api/genlayer/status` what this deployment can do, so it
+never offers a button that is guaranteed to fail:
+
+| Deployment | Reads (`get_receipt`) | Writes (adjudicate) | What the demo does |
+| --- | --- | --- | --- |
+| No `AGENTREF_ACCOUNT_PRIVATE_KEY` | ✅ available | ❌ unavailable | Defaults to the **Simulated fallback**, labelled as such; the GenLayer option stays visible but disabled with the reason |
+| Funded `AGENTREF_ACCOUNT_PRIVATE_KEY` | ✅ | ✅ | Defaults to **GenLayer validators** and signs the three writes |
+
+Either way the app never claims a validator verdict it did not read from the
+contract: the fallback badge reads *"Simulated fallback — GenLayer validators
+were not consulted"*. Set the key and the live path takes over with no code
+change.
 
 > Note on `genlayer/contract.py`: the repo also carries a richer reference
 > contract (AgentRefAdjudicator) used in earlier work. The app now targets the

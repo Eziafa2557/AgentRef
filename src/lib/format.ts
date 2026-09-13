@@ -55,6 +55,6 @@ export function sourceLabel(source: "genlayer" | "simulated"): {
       }
     : {
         short: "SIMULATED",
-        full: "SIMULATED — validators were not consulted",
+        full: "Simulated fallback — GenLayer validators were not consulted",
       };
 }
