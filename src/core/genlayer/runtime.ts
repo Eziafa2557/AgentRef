@@ -12,21 +12,22 @@
  * Imported ONLY by Next.js route handlers (server side): the private signing
  * key lives in a server-only env var and never reaches the browser.
  *
- * Verified against the installed `genlayer-js@1.1.8` types:
+ * Verified against the installed `genlayer-js@2.0.0-rc.1` types:
  *   - createClient({ chain, account }) / createAccount(privateKey)
- *   - writeContract({ address, functionName, args, value })  (value REQUIRED on 1.1.8)
- *   - waitForTransactionReceipt({ hash, status, interval, retries })
+ *   - writeContract({ address, functionName, args, value })  (value REQUIRED for a non-payable write)
+ *   - waitForTransactionReceipt({ hash, waitUntil: "finalized", interval, retries })
  *   - readContract({ ..., transactionHashVariant: TransactionHashVariant.LATEST_FINAL })
- *   - success is judged from the transaction's statusName + txExecutionResultName
- *     (there is no isSuccessful() export on 1.1.8).
+ *   - isSuccessful(transaction) judges success (exported only from >= 2.0.0-rc.1)
+ *   - getContractSchema(address) — a POSITIONAL argument — verifies the contract
+ *     surface we are about to call, so a mis-pointed address is reported rather
+ *     than silently read.
  *
  * @server-only — importing this module pulls genlayer-js + viem into the bundle,
  * so client components must go through the API routes in src/app/api/genlayer.
  */
-import { createAccount, createClient } from "genlayer-js";
-import { localnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
+import { createAccount, createClient, isSuccessful } from "genlayer-js";
+import { localnet, studioDevnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
 import {
-  ExecutionResult,
   TransactionHashVariant,
   TransactionStatus,
   type GenLayerTransaction,
@@ -34,7 +35,14 @@ import {
 } from "genlayer-js/types";
 
 import { SIGNER_KEY_ENV_VARS, getGenLayerAccount, getGenLayerConfig } from "./config";
-import { explorerTxUrl, parseReceiptLine, statusIsDecided, type OnchainReceiptRecord } from "./contract";
+import {
+  CONTRACT_METHODS,
+  LIVE_CONTRACT,
+  explorerTxUrl,
+  parseReceiptLine,
+  statusIsDecided,
+  type OnchainReceiptRecord,
+} from "./contract";
 
 export type GenLayerOutcome =
   | { status: "not-configured"; reason: string }
@@ -43,7 +51,7 @@ export type GenLayerOutcome =
   | { status: "empty"; record: OnchainReceiptRecord; contractAddress: string; network: string; chainLabel: string; note: string }
   | { status: "error"; message: string };
 
-const CHAINS = { localnet, studionet, testnetAsimov, testnetBradbury };
+const CHAINS = { localnet, studioDevnet, studionet, testnetAsimov, testnetBradbury };
 type ChainKey = keyof typeof CHAINS;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -82,12 +90,19 @@ function pickChain(chainKey: string): { ok: true; chain: (typeof CHAINS)[ChainKe
   return { ok: true, chain };
 }
 
+/**
+ * Whether a write that reached FINALIZED actually succeeded.
+ *
+ * `isSuccessful` is the SDK's own judgement (exported from genlayer-js >=
+ * 2.0.0-rc.1). The FINALIZED check stays: a transaction can be finalized with
+ * its execution having reverted, and a reverted write must never be reported as
+ * a verdict. Replacing the old statusName/txExecutionResultName hand-roll with
+ * the SDK's own predicate removes a place where our guess could drift from the
+ * protocol.
+ */
 function finalizedSucceeded(receipt: GenLayerTransaction): boolean {
-  const status = receipt.statusName;
-  if (status !== TransactionStatus.FINALIZED && status !== TransactionStatus.ACCEPTED) return false;
-  // A write that reverted reports FINISHED_WITH_ERROR. A normal return (even a
-  // Python `None`) reports FINISHED_WITH_RETURN (or is absent on older nodes).
-  return receipt.txExecutionResultName !== ExecutionResult.FINISHED_WITH_ERROR;
+  if (receipt.statusName !== TransactionStatus.FINALIZED) return false;
+  return isSuccessful(receipt);
 }
 
 /**
@@ -130,9 +145,9 @@ async function writeAndWait(
   try {
     receipt = await client.waitForTransactionReceipt({
       hash: txHash as Hash,
-      status: TransactionStatus.FINALIZED,
+      waitUntil: "finalized", // `status` is deprecated in genlayer-js >= 2.0.0-rc.1
       interval: 5_000,
-      retries: 120, // up to ~10 min: consensus on a public testnet runs real validators
+      retries: 120, // up to ~10 min: consensus runs real validators
     });
   } catch (e) {
     throw new Error(
@@ -147,6 +162,52 @@ async function writeAndWait(
     );
   }
   return txHash as string;
+}
+
+/**
+ * Assert the address really holds the AgentRef contract before calling it.
+ *
+ * The schema is the NODE's answer about the deployed code, not our assumption
+ * about it. A contract built from a different source — Studio's hello_world
+ * example, say — reports a different method set. Without this check the read
+ * path would happily return that contract's state, and the UI would render the
+ * blank it got back as "not adjudicated yet", which is a lie about the chain.
+ *
+ * Returns a human-readable problem, or null when the surface is right — or when
+ * we could not obtain a schema at all. A transient schema-read failure must not
+ * block a read that would otherwise work: we only reject on POSITIVE evidence
+ * that the contract is the wrong one.
+ */
+async function agentRefSurfaceProblem(
+  client: ReturnType<typeof createClient>,
+  contractAddress: `0x${string}`
+): Promise<string | null> {
+  let methods: Record<string, { readonly?: boolean; params?: unknown[] }>;
+  try {
+    const schema = await client.getContractSchema(contractAddress);
+    methods = (schema?.methods ?? {}) as typeof methods;
+  } catch {
+    return null; // could not verify — the call itself will report the real error
+  }
+
+  const required = [CONTRACT_METHODS.read.name, ...CONTRACT_METHODS.writes.map((w) => w.name)];
+  const missing = required.filter((name) => !methods[name]);
+  if (!Object.keys(methods).length) return null; // empty schema: nothing proven
+  if (missing.length) {
+    const found = Object.keys(methods);
+    return (
+      `The contract at ${contractAddress} does not expose ${missing.join(", ")}. ` +
+      `It exposes: ${found.length ? found.join(", ") : "(no methods)"}. ` +
+      "This address does not hold the AgentRef contract — check the deployed address."
+    );
+  }
+
+  // get_receipt must be a VIEW: if it is a write, reading it would not return
+  // the stored receipt and every read would look empty.
+  if (methods[CONTRACT_METHODS.read.name]?.readonly !== true) {
+    return `The contract at ${contractAddress} exposes ${CONTRACT_METHODS.read.name} as a write method, not a view — it is not the AgentRef contract.`;
+  }
+  return null;
 }
 
 export interface AdjudicateArgs {
@@ -191,6 +252,11 @@ export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerO
     const signer = createAccount(asPrivateKey(account.privateKey));
     const client = createClient({ chain: chainPick.chain, account: signer });
 
+    // Confirm the surface BEFORE signing anything: three writes that cannot
+    // succeed would burn fees and time only to fail at the first call.
+    const surfaceProblem = await agentRefSurfaceProblem(client, contractAddress);
+    if (surfaceProblem) return { status: "error", message: surfaceProblem };
+
     // One adjudication = three writes; adjudicate() is the one that makes
     // validators rule, so its transaction is the provenance we show.
     const calls: Array<[string, string[]]> = [
@@ -231,6 +297,10 @@ export async function readOnChainReceipt(): Promise<GenLayerOutcome> {
   try {
     const contractAddress = asAddress(ready.config.contractAddress);
     const client = createClient({ chain: chainPick.chain });
+
+    // Never interpret a contract we have not confirmed is AgentRef.
+    const surfaceProblem = await agentRefSurfaceProblem(client, contractAddress);
+    if (surfaceProblem) return { status: "error", message: surfaceProblem };
 
     const res = (await client.readContract({
       address: contractAddress,

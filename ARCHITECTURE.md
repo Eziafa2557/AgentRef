@@ -16,7 +16,7 @@ when it enters the record, and every hash can be recomputed on demand.
        │                              ▼                                        ▼                         │
    localStorage ◀── repo.write ── Receipt (REF-…)              ┌──────────────┴──────────────┐           │
        │                                                       │ SIMULATED        │ GENLAYER │           │
-   /r/[id] public read-only view                               │ local model      │ contract.py         │
+   /r/[id] public read-only view                               │ local model      │ agentref.py          │
                                                                │ (evaluate.ts)    │ + runtime.ts         │
                                                                │ source:"simulated"│  → API routes       │
                                                                │                  │  (server signs)     │
@@ -35,11 +35,11 @@ live GenLayer path builds one from the flat `get_receipt()` record
 
 | | SIMULATED fallback | GENLAYER (live) |
 | --- | --- | --- |
-| Where | `src/core/evaluate.ts` | live Bradbury contract via `src/core/genlayer/runtime.ts` |
-| Who decides | transparent local rules model | GenLayer validators on Testnet — Bradbury |
+| Where | `src/core/evaluate.ts` | deployed Studio Dev contract via `src/core/genlayer/runtime.ts` |
+| Who decides | transparent local rules model | GenLayer validators on Studio Dev (chain 61997) |
 | `Ruling.source` | `"simulated"` | `"genlayer"` |
 | Labelled in UI | `Simulated fallback` | `GENLAYER` + on-chain `Status` / `Score` / `Reason` |
-| Needs | nothing | reads: nothing · writes: `AGENTREF_ACCOUNT_PRIVATE_KEY` (funded) |
+| Needs | nothing | reads: nothing · writes: `AGENTBEE_ACCOUNT_PRIVATE_KEY` (funded) |
 
 **Which one runs:** `/api/genlayer/status` exposes `canAdjudicate`
 (`adjudicationCapability()` in `config.ts`) — a boolean derived from server env.
@@ -80,11 +80,12 @@ contact validators; the GENLAYER path never runs without the live contract, and
   `parseRulingJson`; lenient on booleans, strict on the verdict. The SIMULATED
   path and legacy JSON rulings go through here; the live GenLayer path builds
   its Ruling from the flat on-chain record via `genlayer/contract.ts`.
-- **`genlayer/contract.ts`** — pure model of the **live** deployed contract:
-  `LIVE_CONTRACT` (address, network, deploy tx), the `get_receipt()` pipe-delimited
-  format parser (`parseReceiptLine`), `verdictForStatus` and `onchainRuling`.
+- **`genlayer/contract.ts`** — pure model of the **deployed** contract:
+  `LIVE_CONTRACT` (address, network), `CONTRACT_METHODS` (the surface the app
+  requires), the `get_receipt()` pipe-delimited format parser
+  (`parseReceiptLine`), `verdictForStatus` and `onchainRuling`.
 - **`genlayer/config.ts`** — client-safe env → `{kind:"ready"}`, defaulting to
-  the live contract (address + `testnet_bradbury`), mapping each accepted
+  the live contract (address + `studio_dev`), mapping each accepted
   network label to its camelCase `genlayer-js/chains` export so users only ever
   name a network.
 - **`genlayer/runtime.ts`** — **server-only** real path. `adjudicateOnChain`

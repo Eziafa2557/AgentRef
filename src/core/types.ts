@@ -186,7 +186,7 @@ export interface VerificationRequest {
  * The structured verdict schema we ask validators to produce. This is the
  * machine-readable contract between the adjudicator and the parser; the
  * GenLayer Intelligent Contract reproduces this exact shape (see
- * genlayer/contract.py) so a ruling is directly usable by the app.
+ * genlayer/agentref.py) so a ruling is directly usable by the app.
  */
 export interface RulingSchema {
   verdict: Verdict;
@@ -204,7 +204,7 @@ export type GenLayerConfigStatus =
   | {
       kind: "ready";
       network: string;
-      /** genlayer-js/chains export name (e.g. "testnetBradbury"). */
+      /** genlayer-js/chains export name (e.g. "studioDevnet"). */
       chainKey: string;
       contractAddress: string;
       chainLabel: string;

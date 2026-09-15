@@ -6,8 +6,6 @@ from genlayer.types import *
 
 
 class AgentRef(gl.contract.Contract):
-    # `challenge` is a method, so the challenge text lives in `challenge_text`
-    # (a field and a method cannot share a name on this runner).
     brief: str
     work: str
     evidence: str
@@ -16,14 +14,14 @@ class AgentRef(gl.contract.Contract):
     status: str
     reason: str
 
-    def __init__(self):
-        self.brief = ""
-        self.work = ""
-        self.evidence = ""
-        self.agent = ""
-        self.challenge_text = ""
-        self.status = "EMPTY"
-        self.reason = ""
+    def __init__(self, brief: str = "", work: str = "", evidence: str = "", agent: str = "", challenge_text: str = "", status: str = "EMPTY", reason: str = ""):
+        self.brief = brief
+        self.work = work
+        self.evidence = evidence
+        self.agent = agent
+        self.challenge_text = challenge_text
+        self.status = status
+        self.reason = reason
 
     @gl.public.write
     def create_receipt(self, brief: str, work: str, evidence: str, agent: str) -> None:
@@ -46,6 +44,7 @@ class AgentRef(gl.contract.Contract):
     def adjudicate(self) -> None:
         if self.status == "EMPTY":
             raise gl.vm.UserError("no receipt")
+            
         prompt = (
             "Decide whether the WORK followed the BRIEF, taking the CHALLENGE "
             "into account. Answer with one word: PASS or FAIL.\n"
@@ -58,8 +57,6 @@ class AgentRef(gl.contract.Contract):
         def judge() -> str:
             return gl.nondet.exec_prompt(prompt)
 
-        # Validator consensus: the leader runs judge(), every validator re-runs
-        # it, and an NLP integrity check rules on equivalence.
         answer = str(
             gl.eq_principle.prompt_non_comparative(
                 judge,
@@ -74,10 +71,10 @@ class AgentRef(gl.contract.Contract):
 
     @gl.public.view
     def get_receipt(self) -> str:
-        challenge = ("Challenge: " + self.challenge_text) if self.challenge_text else "No challenge"
+        challenge_str = ("Challenge: " + self.challenge_text) if self.challenge_text else "No challenge"
         score = {"VERIFIED": "1/1", "NOT_VERIFIED": "0/1"}.get(self.status, "")
         return (
             "Status: " + self.status + " | Agent: " + self.agent
             + " | Brief: " + self.brief + " | Work: " + self.work
-            + " | " + challenge + " | Score: " + score + " | Reason: " + self.reason
+            + " | " + challenge_str + " | Score: " + score + " | Reason: " + self.reason
         )

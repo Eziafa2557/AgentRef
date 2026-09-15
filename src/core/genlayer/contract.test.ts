@@ -11,7 +11,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CONTRACT_METHODS,
   LIVE_CONTRACT,
+  STUDIO_DEV,
   onchainRuling,
   parseReceiptLine,
   statusIsDecided,
@@ -31,11 +33,29 @@ const NOT_VERIFIED_LOOSE =
   "TVL figures outdated. | Score: 41 | Reason: The work never names a single protocol or a current TVL figure.";
 
 describe("LIVE_CONTRACT", () => {
-  it("points at the deployed Bradbury contract", () => {
+  it("points at the deployed Studio Dev contract (chain 61997)", () => {
     assert.match(LIVE_CONTRACT.address, /^0x[0-9a-fA-F]{40}$/);
-    assert.equal(LIVE_CONTRACT.network, "testnet_bradbury");
-    assert.equal(LIVE_CONTRACT.chainKey, "testnetBradbury");
-    assert.match(LIVE_CONTRACT.deployTxHash, /^0x[0-9a-fA-F]{64}$/);
+    assert.equal(LIVE_CONTRACT.network, "studio_dev");
+    assert.equal(LIVE_CONTRACT.chainKey, "studioDevnet");
+    assert.equal(STUDIO_DEV.chainId, 61997);
+    // deployTxHash is only set once a deploy tx is confirmed; when present it
+    // must be a real hash — the explorer links are guarded on it being set.
+    if (LIVE_CONTRACT.deployTxHash) assert.match(LIVE_CONTRACT.deployTxHash, /^0x[0-9a-fA-F]{64}$/);
+  });
+
+  it("declares the exact contract surface runtime.ts verifies", () => {
+    // These four are what the deployed contract must expose; runtime.ts reads
+    // the node's schema and refuses any contract that does not.
+    assert.equal(CONTRACT_METHODS.read.name, "get_receipt");
+    assert.equal(CONTRACT_METHODS.read.readonly, true);
+    assert.deepEqual(
+      CONTRACT_METHODS.writes.map((w) => [w.name, w.params]),
+      [
+        ["create_receipt", 4],
+        ["challenge", 2],
+        ["adjudicate", 0],
+      ]
+    );
   });
 });
 
@@ -90,6 +110,16 @@ describe("statusIsDecided / verdictForStatus", () => {
     assert.equal(statusIsDecided("NOT_CREATED"), false);
   });
 
+  it("treats the contract's in-flight states as not-decided", () => {
+    // create_receipt writes OPEN and challenge writes CHALLENGED. Neither is a
+    // verdict — reporting them as "unmapped status" would misdescribe a dispute
+    // that is simply still in flight.
+    assert.equal(statusIsDecided("OPEN"), false);
+    assert.equal(statusIsDecided("CHALLENGED"), false);
+    assert.equal(verdictForStatus("OPEN"), null);
+    assert.equal(verdictForStatus("CHALLENGED"), null);
+  });
+
   it("treats NOT_VERIFIED / VERIFIED as decided", () => {
     assert.equal(statusIsDecided("NOT_VERIFIED"), true);
     assert.equal(statusIsDecided("VERIFIED"), true);
@@ -119,7 +149,7 @@ describe("onchainRuling", () => {
     assert.equal(ruling.genlayerStatus, "NOT_VERIFIED");
     assert.equal(ruling.genlayerScore, "41");
     assert.match(ruling.reasoning, /never names a single protocol/);
-    assert.match(ruling.explorerUrl ?? "", /explorer-bradbury\.genlayer\.com\/tx\//);
+    assert.match(ruling.explorerUrl ?? "", /explorer-studio-dev\.genlayer\.com\/tx\//);
   });
 
   it("refuses to build a ruling for an unmapped status", () => {

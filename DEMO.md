@@ -71,10 +71,12 @@ your actual material. Because the model is deterministic and inspectable
 check that the stated reasoning matches what it looked for.
 
 **Where is GenLayer in all this?** Every ruling above is tagged SIMULATED — the
-UI says so, on purpose. To see the real path: deploy `genlayer/contract.py`
-(see `genlayer/README.md`), set the env in `.env.local`, install `genlayer-js`,
-and the verify page unlocks **“GENLAYER validators.”** Rulings then arrive with
-`source: "genlayer"` and carry contract/transaction provenance.
+UI says so, on purpose. The app already ships wired to the live contract on
+Studio Dev (`genlayer/agentref.py`); the real path runs as soon as this
+deployment has a **funded signer key** (`AGENTBEE_ACCOUNT_PRIVATE_KEY`, set
+server-side — see `genlayer/README.md`). The verify page then defaults to
+**“GENLAYER validators.”** Rulings arrive with `source: "genlayer"` and carry
+contract/transaction provenance.
 
 **Public receipts:** on any record tap **Public link** (share icon) → it copies
 `/r/[id]`. Open it: the same immutable, read-only record — integrity check

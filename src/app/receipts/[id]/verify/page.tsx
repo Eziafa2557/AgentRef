@@ -36,7 +36,7 @@ const SIM_STEPS = [
 ];
 
 const GL_STEPS = [
-  { title: "Adjudicate on GenLayer validators", detail: "create_receipt → challenge → adjudicate() on the live Testnet — Bradbury contract. Validator consensus decides — not an in-app AI." },
+  { title: "Adjudicate on GenLayer validators", detail: `create_receipt → challenge → adjudicate() on the live ${LIVE_CONTRACT.chainLabel} contract. Validator consensus decides — not an in-app AI.` },
   { title: "Read the on-chain verdict", detail: "Calls get_receipt() and parses Status / Score / Reason from the contract's public record." },
   { title: "Record the verdict", detail: "Saves the GenLayer verdict + explorer link on the receipt and settles the escrow." },
 ];
@@ -457,7 +457,7 @@ export default function VerifyPage() {
                 ? "Simulated fallback — local rules model"
                 : step >= 2
                   ? "Reading the verdict from GenLayer validators"
-                  : "Adjudicating on GenLayer validators — Testnet Bradbury"}
+                  : `Adjudicating on GenLayer validators — ${LIVE_CONTRACT.chainLabel}`}
             </p>
           </div>
           <div className="mt-4 space-y-0">
@@ -606,14 +606,16 @@ function OnchainVerdictCard({ ruling, receiptId }: { ruling: Ruling; receiptId: 
             View the adjudication transaction <ExternalLink className="h-3.5 w-3.5" />
           </a>
         )}
-        <a
-          href={explorerTxUrl(LIVE_CONTRACT.deployTxHash)}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 underline-offset-2 hover:text-cyan-200 hover:underline"
-        >
-          Contract deploy on the explorer <ExternalLink className="h-3.5 w-3.5" />
-        </a>
+        {LIVE_CONTRACT.deployTxHash && (
+          <a
+            href={explorerTxUrl(LIVE_CONTRACT.deployTxHash)}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 underline-offset-2 hover:text-cyan-200 hover:underline"
+          >
+            Contract deploy on the explorer <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        )}
         {ruling.contractAddress && (
           <span className="font-mono text-[10.5px] text-slate-500">contract {ruling.contractAddress.slice(0, 10)}…{ruling.contractAddress.slice(-6)}</span>
         )}

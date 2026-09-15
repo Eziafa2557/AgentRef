@@ -1,10 +1,10 @@
 /**
  * GenLayer wiring config.
  *
- * AgentRef ships pointing AT THE LIVE deployed Intelligent Contract on GenLayer
- * Testnet — Bradbury (src/core/genlayer/contract.ts → LIVE_CONTRACT). The
- * address is public, so the config is `ready` out of the box and READING the
- * on-chain verdict needs no wallet or key.
+ * AgentRef ships pointing AT THE DEPLOYED Intelligent Contract on **GenLayer
+ * Studio Dev** (chain 61997; src/core/genlayer/contract.ts → LIVE_CONTRACT).
+ * The address is public, so the config is `ready` out of the box and READING
+ * the on-chain verdict needs no wallet or key.
  *
  * ADJUDICATING (create_receipt → challenge → adjudicate, i.e. writes) needs a
  * funded account server-side, set in env only:
@@ -13,9 +13,9 @@
  *
  * Env reference (see .env.example):
  *   NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS   overrides the default live address
- *   NEXT_PUBLIC_AGENTREF_NETWORK            testnet_bradbury | studionet | localnet | testnet_asimov
+ *   NEXT_PUBLIC_AGENTREF_NETWORK            studio_dev | studionet | localnet | testnet_bradbury | testnet_asimov
  *   NEXT_PUBLIC_AGENTREF_CHAIN_KEY          OPTIONAL explicit genlayer-js/chains export name
- *                                           (testnetBradbury). Defaults to the export that matches
+ *                                           (studioDevnet). Defaults to the export that matches
  *                                           the network above.
  */
 import type { GenLayerConfigStatus } from "../types";
@@ -29,13 +29,15 @@ function serverEnv(): NodeJS.ProcessEnv | undefined {
 }
 
 /**
- * genlayer-js/chains exports are camelCase (testnetBradbury, studionet, localnet,
- * testnetAsimov). Map every accepted network label to its chain export so a user
- * only ever has to name the network.
+ * genlayer-js/chains exports are camelCase (studioDevnet, testnetBradbury,
+ * studionet, localnet, testnetAsimov). Map every accepted network label to its
+ * chain export so a user only ever has to name the network.
  */
 const NETWORK_CHAIN_KEYS: Record<string, string> = {
   localnet: "localnet",
   studionet: "studionet",
+  studio_dev: "studioDevnet",
+  studioDevnet: "studioDevnet",
   testnet_bradbury: "testnetBradbury",
   testnetBradbury: "testnetBradbury",
   testnet_asimov: "testnetAsimov",
@@ -45,6 +47,8 @@ const NETWORK_CHAIN_KEYS: Record<string, string> = {
 const NETWORK_LABELS: Record<string, string> = {
   localnet: "Local — GenLayer Studio",
   studionet: "Studio network",
+  studio_dev: "Studio Dev",
+  studioDevnet: "Studio Dev",
   testnet_bradbury: "Testnet — Bradbury",
   testnet_asimov: "Testnet — Asimov",
 };

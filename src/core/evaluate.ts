@@ -6,7 +6,7 @@
  * exercised without a network or credentials. Every ruling it produces is
  * tagged `source: "simulated"` and the UI always labels it "SIMULATED —
  * validators were not consulted". The real path is the GenLayer Intelligent
- * Contract in genlayer/contract.py, reached through src/core/genlayer.
+ * Contract in genlayer/agentref.py, reached through src/core/genlayer.
  *
  * The logic is deliberately inspectable: it checks each explicit requirement
  * and each material-risk requirement against the submitted work with simple

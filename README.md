@@ -103,10 +103,13 @@ AgentRef never fakes the things that matter:
 - **No fake consensus.** SIMULATED rulings are produced by a transparent,
   inspectable local model (`src/core/evaluate.ts`) and are *always labelled*
   `SIMULATED — validators were not consulted` in the UI.
-- **Real GenLayer when you want it.** `genlayer/contract.py` is a real
-  Intelligent Contract (`gl.Contract`) that asks validator nodes to judge a
-  dispute via the Equivalence Principle and stores the consensus ruling. Wire it
-  up and rulings carry on-chain provenance (`source: "genlayer"`).
+- **Real GenLayer when you want it.** The app ships wired to a live Intelligent
+  Contract on **GenLayer Studio Dev (chain 61997)** —
+  `0xaF982d37492368e03413DaCe68E8525bf97f822B`, source in `genlayer/agentref.py`.
+  `adjudicate()` asks validator nodes to judge the dispute via the Equivalence
+  Principle and stores the consensus verdict, so rulings carry on-chain
+  provenance (`source: "genlayer"`). Reading it needs no wallet; signing the
+  writes needs a funded server-side key.
 - **No fake identities.** Parties are self-attested labels.
 - **No fake money.** Escrow amounts and settlement are explicitly simulated.
 
@@ -133,7 +136,7 @@ src/
   lib/             provider + presentation helpers
   components/      UI kit + shared ReceiptView + nav
   app/             pages (App Router)
-genlayer/          contract.py + deploy notes (the real network path)
+genlayer/          agentref.py — the deployed contract, byte-identical to chain
 ```
 
 ---

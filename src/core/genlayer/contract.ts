@@ -10,19 +10,49 @@
  *   adjudicate()                       -> validators rule VERIFIED / NOT_VERIFIED
  *   get_receipt() -> "Status: … | Agent: … | Brief: … | Work: … | … | Score: … | Reason: …"
  *
+ * Status lifecycle written by the contract: EMPTY (never used) → OPEN
+ * (create_receipt) → CHALLENGED (challenge) → VERIFIED / NOT_VERIFIED
+ * (adjudicate). Only the last two are verdicts; the earlier three mean "no
+ * ruling yet" and are treated as such by statusIsDecided.
+ *
  * The address below is PUBLIC and reading it needs no wallet and no key. This
  * module is deliberately pure (no SDK, no React) so the same parser that the
  * server route uses is unit-tested against the exact live get_receipt() format.
  */
 import type { Ruling, Verdict } from "../types";
 
+/**
+ * GenLayer **Studio Dev** — the network AgentRef targets (chain 61997).
+ *
+ * genlayer-js ships this as the `studioDevnet` chain export; its bundled RPC is
+ * exactly https://studio-dev.genlayer.com/api. The export carries no block
+ * explorer, so we attach the Studio Dev explorer ourselves. Studio chains use
+ * the Studio consensus ABI, which requires genlayer-js >= 2.0.0-rc.1 (see
+ * runtime.ts).
+ */
+export const STUDIO_DEV = {
+  chainId: 61997,
+  network: "studio_dev",
+  /** genlayer-js/chains export name this network uses. */
+  chainKey: "studioDevnet",
+  chainLabel: "Studio Dev",
+  explorerBase: "https://explorer-studio-dev.genlayer.com",
+} as const;
+
+/**
+ * The deployed AgentRef single-receipt contract on Studio Dev.
+ *
+ * runtime.ts re-checks this address's schema on every read (CONTRACT_METHODS
+ * below), so an address that does not actually hold AgentRef is reported
+ * instead of silently returning an unrelated contract's state.
+ */
 export const LIVE_CONTRACT = {
-  /** Deployed on GenLayer Testnet — Bradbury (chain 4221). */
-  address: "0x648a2C783d3ED63fF47E1d5A4C90AF4714931c6f",
-  network: "testnet_bradbury",
-  chainKey: "testnetBradbury",
-  chainLabel: "Testnet — Bradbury",
-  deployTxHash: "0x64519fc90c8a0960943158e33c8efb6e04890dd7d4d4ac7e896d7880ba26a5e5",
+  address: "0xaF982d37492368e03413DaCe68E8525bf97f822B",
+  network: STUDIO_DEV.network,
+  chainKey: STUDIO_DEV.chainKey,
+  chainLabel: STUDIO_DEV.chainLabel,
+  /** Deploy tx of the Studio Dev contract (explorer link). */
+  deployTxHash: "0x815961aca415bc42301dd322a591ae3cbd2af10e8962dcfe93b289ed3f11a2af",
   methods: [
     "create_receipt(brief, work, evidence, agent)",
     "challenge(reason, evidence)",
@@ -31,7 +61,23 @@ export const LIVE_CONTRACT = {
   ],
 } as const;
 
-export const EXPLORER_BASE = "https://explorer-bradbury.genlayer.com";
+/**
+ * The contract surface AgentRef depends on, as the GenVM schema reports it.
+ * runtime.ts refuses to interpret a contract that does not expose these, so a
+ * wrong address fails loudly rather than reading an unrelated contract.
+ */
+export const CONTRACT_METHODS = {
+  /** Read path — must exist and must be a view. */
+  read: { name: "get_receipt", readonly: true, params: 0 },
+  /** Write path — create_receipt → challenge → adjudicate. */
+  writes: [
+    { name: "create_receipt", params: 4 },
+    { name: "challenge", params: 2 },
+    { name: "adjudicate", params: 0 },
+  ],
+} as const;
+
+export const EXPLORER_BASE = STUDIO_DEV.explorerBase;
 
 export function explorerTxUrl(txHash: string): string {
   return `${EXPLORER_BASE}/tx/${txHash}`;
@@ -70,8 +116,25 @@ export function emptyRecord(raw = ""): OnchainReceiptRecord {
 /** Field keys get_receipt() emits (pipe-delimited, each value ends at the next " | "). */
 const KEYED = ["Status:", "Agent:", "Brief:", "Work:", "Score:", "Reason:"] as const;
 
-/** Statuses that mean "the contract has not ruled yet". */
-const START_STATUSES = new Set(["", "EMPTY", "NOT_CREATED", "UNINITIALIZED", "INITIAL", "IDLE"]);
+/**
+ * Statuses that mean "the contract has not ruled yet".
+ *
+ * OPEN and CHALLENGED are the deployed contract's own in-flight states
+ * (create_receipt sets OPEN, challenge sets CHALLENGED); only adjudicate()
+ * writes VERIFIED / NOT_VERIFIED. Treating them as undecided is what stops the
+ * UI from reporting "the contract returned an unmapped status" while a dispute
+ * is simply still mid-flight.
+ */
+const START_STATUSES = new Set([
+  "",
+  "EMPTY",
+  "NOT_CREATED",
+  "UNINITIALIZED",
+  "INITIAL",
+  "IDLE",
+  "OPEN",
+  "CHALLENGED",
+]);
 
 /**
  * Parse the live pipe-delimited get_receipt() string.

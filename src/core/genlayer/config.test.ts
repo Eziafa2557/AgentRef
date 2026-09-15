@@ -47,6 +47,7 @@ function restoreGenLayerEnv(saved: Record<string, string | undefined>) {
 
 describe("resolveChainKey", () => {
   it("maps accepted network labels to camelCase genlayer-js/chains exports", () => {
+    assert.equal(resolveChainKey("studio_dev"), "studioDevnet");
     assert.equal(resolveChainKey("testnet_bradbury"), "testnetBradbury");
     assert.equal(resolveChainKey("testnet_asimov"), "testnetAsimov");
     assert.equal(resolveChainKey("studionet"), "studionet");
@@ -72,7 +73,7 @@ describe("getGenLayerConfig (no env)", () => {
       assert.equal(config.contractAddress, LIVE_CONTRACT.address);
       assert.equal(config.network, LIVE_CONTRACT.network);
       assert.equal(config.chainKey, LIVE_CONTRACT.chainKey);
-      assert.match(config.chainLabel, /Bradbury/i);
+      assert.match(config.chainLabel, /Studio Dev/i);
     } finally {
       restoreGenLayerEnv(saved);
     }

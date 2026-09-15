@@ -473,7 +473,7 @@ function RulingBlock({ r }: { r: Receipt }) {
         )}
       >
         {ruling.source === "genlayer"
-          ? "Judged by GenLayer validators on Testnet Bradbury — this verdict was read from the live on-chain record. No in-app AI was consulted."
+          ? `Judged by GenLayer validators on ${LIVE_CONTRACT.chainLabel} — this verdict was read from the live on-chain record. No in-app AI was consulted.`
           : `${sLabel.full}. This verdict came from AgentRef's transparent local model so the full flow can run without a network.`}
       </p>
 
@@ -494,14 +494,16 @@ function RulingBlock({ r }: { r: Receipt }) {
               View the adjudication transaction on the explorer <ExternalLink className="h-3 w-3" />
             </a>
           )}
-          <a
-            href={explorerTxUrl(LIVE_CONTRACT.deployTxHash)}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 underline-offset-2 hover:text-cyan-200 hover:underline"
-          >
-            Contract deploy <ExternalLink className="h-3 w-3" />
-          </a>
+          {LIVE_CONTRACT.deployTxHash && (
+            <a
+              href={explorerTxUrl(LIVE_CONTRACT.deployTxHash)}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 underline-offset-2 hover:text-cyan-200 hover:underline"
+            >
+              Contract deploy <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
         </div>
       )}
 
