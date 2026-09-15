@@ -1,5 +1,5 @@
 # v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9feyyls9qz98sz2nbrd8mg4sxqg2qng" }
 """
 AgentRef single-receipt adjudicator — a GenLayer Intelligent Contract.
 
