@@ -11,7 +11,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  EXPLORER_BASE,
   LIVE_CONTRACT,
+  STUDIO_NEXT,
+  explorerTxUrl,
   onchainRuling,
   parseReceiptLine,
   statusIsDecided,
@@ -31,11 +34,29 @@ const NOT_VERIFIED_LOOSE =
   "TVL figures outdated. | Score: 41 | Reason: The work never names a single protocol or a current TVL figure.";
 
 describe("LIVE_CONTRACT", () => {
-  it("points at the deployed Bradbury contract", () => {
-    assert.match(LIVE_CONTRACT.address, /^0x[0-9a-fA-F]{40}$/);
-    assert.equal(LIVE_CONTRACT.network, "testnet_bradbury");
-    assert.equal(LIVE_CONTRACT.chainKey, "testnetBradbury");
-    assert.match(LIVE_CONTRACT.deployTxHash, /^0x[0-9a-fA-F]{64}$/);
+  it("targets Studio Next (chain 61997), not Bradbury", () => {
+    assert.equal(LIVE_CONTRACT.network, "studio_next");
+    assert.equal(LIVE_CONTRACT.chainKey, "studioDevnet");
+    assert.equal(STUDIO_NEXT.chainId, 61997);
+    assert.equal(STUDIO_NEXT.rpcUrl, "https://studio-next.genlayer.com/api");
+    assert.equal(EXPLORER_BASE, "https://explorer-studio-dev.genlayer.com");
+  });
+
+  it("only carries an address once one is deployed", () => {
+    if (LIVE_CONTRACT.address) {
+      assert.match(LIVE_CONTRACT.address, /^0x[0-9a-fA-F]{40}$/);
+      assert.match(LIVE_CONTRACT.deployTxHash, /^0x[0-9a-fA-F]{64}$/);
+    } else {
+      // Unset is a valid, honest state: config reports not-configured.
+      assert.equal(LIVE_CONTRACT.address, "");
+    }
+  });
+
+  it("builds explorer transaction links on the Studio Dev explorer", () => {
+    assert.equal(
+      explorerTxUrl("0xabc"),
+      "https://explorer-studio-dev.genlayer.com/tx/0xabc"
+    );
   });
 });
 
@@ -119,7 +140,7 @@ describe("onchainRuling", () => {
     assert.equal(ruling.genlayerStatus, "NOT_VERIFIED");
     assert.equal(ruling.genlayerScore, "41");
     assert.match(ruling.reasoning, /never names a single protocol/);
-    assert.match(ruling.explorerUrl ?? "", /explorer-bradbury\.genlayer\.com\/tx\//);
+    assert.match(ruling.explorerUrl ?? "", /explorer-studio-dev\.genlayer\.com\/tx\//);
   });
 
   it("refuses to build a ruling for an unmapped status", () => {

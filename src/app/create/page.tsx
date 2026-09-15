@@ -196,7 +196,7 @@ function CreateInner() {
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             Minting hashes the material locally and holds escrow in a simulated state. No wallet is needed to mint. If a
             dispute is raised later, it can be judged by the transparent local model or — for real — by GenLayer
-            validators on Testnet Bradbury.
+            validators on Studio Next.
           </p>
         </div>
       </Card>

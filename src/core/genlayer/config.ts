@@ -1,20 +1,20 @@
 /**
  * GenLayer wiring config.
  *
- * AgentRef ships pointing AT THE LIVE deployed Intelligent Contract on GenLayer
- * Testnet — Bradbury (src/core/genlayer/contract.ts → LIVE_CONTRACT). The
- * address is public, so the config is `ready` out of the box and READING the
- * on-chain verdict needs no wallet or key.
+ * AgentRef targets the deployed Intelligent Contract on **GenLayer Studio Next**
+ * (chain 61997, src/core/genlayer/contract.ts → LIVE_CONTRACT). The address is
+ * public, so READING the on-chain verdict needs no wallet or key.
  *
  * ADJUDICATING (create_receipt → challenge → adjudicate, i.e. writes) needs a
  * funded account server-side, set in env only:
- *   AGENTREF_ACCOUNT_PRIVATE_KEY   server-only signer key (never exposed)
+ *   AGENTBEE_ACCOUNT_PRIVATE_KEY   server-only signer key (never exposed)
+ *   AGENTREF_ACCOUNT_PRIVATE_KEY   legacy alias, still honoured
  *
  * Env reference (see .env.example):
  *   NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS   overrides the default live address
- *   NEXT_PUBLIC_AGENTREF_NETWORK            testnet_bradbury | studionet | localnet | testnet_asimov
+ *   NEXT_PUBLIC_AGENTREF_NETWORK            studio_next | testnet_bradbury | studionet | localnet | testnet_asimov
  *   NEXT_PUBLIC_AGENTREF_CHAIN_KEY          OPTIONAL explicit genlayer-js/chains export name
- *                                           (testnetBradbury). Defaults to the export that matches
+ *                                           (studioDevnet). Defaults to the export that matches
  *                                           the network above.
  */
 import type { GenLayerConfigStatus } from "../types";
@@ -28,13 +28,16 @@ function serverEnv(): NodeJS.ProcessEnv | undefined {
 }
 
 /**
- * genlayer-js/chains exports are camelCase (testnetBradbury, studionet, localnet,
- * testnetAsimov). Map every accepted network label to its chain export so a user
- * only ever has to name the network.
+ * genlayer-js/chains exports are camelCase (studioDevnet, testnetBradbury,
+ * studionet, localnet, testnetAsimov). Map every accepted network label to its
+ * chain export so a user only ever has to name the network.
  */
 const NETWORK_CHAIN_KEYS: Record<string, string> = {
   localnet: "localnet",
   studionet: "studionet",
+  studio_next: "studioDevnet",
+  studioNext: "studioDevnet",
+  studioDevnet: "studioDevnet",
   testnet_bradbury: "testnetBradbury",
   testnetBradbury: "testnetBradbury",
   testnet_asimov: "testnetAsimov",
@@ -44,6 +47,8 @@ const NETWORK_CHAIN_KEYS: Record<string, string> = {
 const NETWORK_LABELS: Record<string, string> = {
   localnet: "Local — GenLayer Studio",
   studionet: "Studio network",
+  studio_next: "Studio Next",
+  studioDevnet: "Studio Next",
   testnet_bradbury: "Testnet — Bradbury",
   testnet_asimov: "Testnet — Asimov",
 };
@@ -63,6 +68,14 @@ export function getGenLayerConfig(): GenLayerConfigStatus {
     process.env.NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS?.trim() ||
     serverEnv()?.AGENTREF_CONTRACT_ADDRESS?.trim() ||
     LIVE_CONTRACT.address;
+  if (!has(address)) {
+    return {
+      kind: "not-configured",
+      reason:
+        "No AgentRef contract address is set for Studio Next. Deploy the contract and set " +
+        "NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS (see .env.example).",
+    };
+  }
   const network =
     process.env.NEXT_PUBLIC_AGENTREF_NETWORK?.trim() ||
     serverEnv()?.AGENTREF_NETWORK?.trim() ||
@@ -85,10 +98,27 @@ export interface GenLayerAccount {
   accountName: string;
 }
 
+/**
+ * Accepted names for the server-only signer key. `AGENTBEE_ACCOUNT_PRIVATE_KEY`
+ * is what Production sets; `AGENTREF_ACCOUNT_PRIVATE_KEY` is the older name and
+ * still works so existing deployments don't break on this rename.
+ */
+export const SIGNER_KEY_ENV_VARS = ["AGENTBEE_ACCOUNT_PRIVATE_KEY", "AGENTREF_ACCOUNT_PRIVATE_KEY"] as const;
+
+/** First configured signer key, or undefined. Never logged, never returned raw. */
+function signerKeyFrom(env?: NodeJS.ProcessEnv): string | undefined {
+  if (!env) return undefined;
+  for (const name of SIGNER_KEY_ENV_VARS) {
+    const v = env[name]?.trim();
+    if (has(v)) return v;
+  }
+  return undefined;
+}
+
 export function getGenLayerAccount(): GenLayerAccount {
   const env = serverEnv();
   return {
-    privateKey: env?.AGENTREF_ACCOUNT_PRIVATE_KEY,
+    privateKey: signerKeyFrom(env),
     chainKey: env?.AGENTREF_CHAIN_KEY?.trim(),
     accountName: env?.AGENTREF_ACCOUNT_NAME?.trim() || "agentref",
   };
@@ -114,14 +144,13 @@ export function adjudicationCapability(account: GenLayerAccount = getGenLayerAcc
   if (!key) {
     return {
       canAdjudicate: false,
-      reason:
-        "This deployment has no signer key (AGENTREF_ACCOUNT_PRIVATE_KEY), so it cannot sign the on-chain writes.",
+      reason: `This deployment has no signer key (${SIGNER_KEY_ENV_VARS[0]}), so it cannot sign the on-chain writes.`,
     };
   }
   if (!PRIVATE_KEY_RE.test(key)) {
     return {
       canAdjudicate: false,
-      reason: "AGENTREF_ACCOUNT_PRIVATE_KEY is not a 0x-prefixed 64-hex private key.",
+      reason: `${SIGNER_KEY_ENV_VARS[0]} is not a 0x-prefixed 64-hex private key.`,
     };
   }
   return { canAdjudicate: true, reason: "A server-side signer key is configured." };

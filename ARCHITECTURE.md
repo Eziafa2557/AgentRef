@@ -35,11 +35,11 @@ live GenLayer path builds one from the flat `get_receipt()` record
 
 | | SIMULATED fallback | GENLAYER (live) |
 | --- | --- | --- |
-| Where | `src/core/evaluate.ts` | live Bradbury contract via `src/core/genlayer/runtime.ts` |
-| Who decides | transparent local rules model | GenLayer validators on Testnet — Bradbury |
+| Where | `src/core/evaluate.ts` | live Studio Next contract via `src/core/genlayer/runtime.ts` |
+| Who decides | transparent local rules model | GenLayer validators on Studio Next |
 | `Ruling.source` | `"simulated"` | `"genlayer"` |
 | Labelled in UI | `Simulated fallback` | `GENLAYER` + on-chain `Status` / `Score` / `Reason` |
-| Needs | nothing | reads: nothing · writes: `AGENTREF_ACCOUNT_PRIVATE_KEY` (funded) |
+| Needs | nothing | reads: nothing · writes: `AGENTBEE_ACCOUNT_PRIVATE_KEY` (funded) |
 
 **Which one runs:** `/api/genlayer/status` exposes `canAdjudicate`
 (`adjudicationCapability()` in `config.ts`) — a boolean derived from server env.
@@ -84,14 +84,14 @@ contact validators; the GENLAYER path never runs without the live contract, and
   `LIVE_CONTRACT` (address, network, deploy tx), the `get_receipt()` pipe-delimited
   format parser (`parseReceiptLine`), `verdictForStatus` and `onchainRuling`.
 - **`genlayer/config.ts`** — client-safe env → `{kind:"ready"}`, defaulting to
-  the live contract (address + `testnet_bradbury`), mapping each accepted
+  the live contract (address + `studio_next` / `studioDevnet`), mapping each accepted
   network label to its camelCase `genlayer-js/chains` export so users only ever
   name a network.
 - **`genlayer/runtime.ts`** — **server-only** real path. `adjudicateOnChain`
   runs `create_receipt → challenge → adjudicate()` on the live contract with a
   server-side signer, each write awaited to a FINALIZED, non-error receipt;
   `readOnChainReceipt` reads `get_receipt()` at the latest finalized round (no
-  key needed). Static `genlayer-js@1.1.8` imports live here and only here.
+  key needed). Static `genlayer-js@2.0.0-rc.1` imports live here and only here.
 - **`app/api/genlayer/{adjudicate,receipt}/route.ts`** — HTTP bridge: the
   browser calls these routes; the SDK and the signing key never cross into the
   client bundle.
@@ -122,7 +122,8 @@ dispute composer.
 
 ## 3. Why `genlayer-js` is server-only
 
-`genlayer-js` (pinned `1.1.8`, matching the stable testnet) is a real installed
+`genlayer-js` (pinned `2.0.0-rc.1` — the first release whose chains carry the
+Studio consensus ABI, so it is what Studio Next requires) is a real installed
 dependency — the adapter is the genuine SDK, not an ambient declaration. To keep
 the SDK weight and the signing key off the demo phone and out of the client
 bundle, `src/core/genlayer/runtime.ts` is the *only* module that imports it, and
@@ -132,7 +133,7 @@ it is reachable exclusively through Next.js route handlers
 - `src/core/genlayer/contract.ts` is the *source of truth* for the live contract
   surface and the `get_receipt()` record format.
 - The browser only ever calls the two JSON routes (`/api/genlayer/adjudicate`,
-  `/api/genlayer/receipt`); `AGENTREF_ACCOUNT_PRIVATE_KEY` lives in server env
+  `/api/genlayer/receipt`); `AGENTBEE_ACCOUNT_PRIVATE_KEY` lives in server env
   and never reaches the client.
 - Without a signer key the app can still **read** the shared on-chain verdict
   (the address is public); adjudicating (writes) additionally needs the key, and
