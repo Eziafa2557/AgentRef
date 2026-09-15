@@ -1,69 +1,84 @@
-# {
-#   "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6"
-# }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 """
-AgentRef single-receipt adjudicator — a real GenLayer Intelligent Contract.
+AgentRef single-receipt adjudicator — a GenLayer Intelligent Contract.
 
-The surface is DELIBERATELY identical to the contract the app already speaks, so
-the frontend, its parser (parseReceiptLine) and the 74 tests stay untouched:
+Surface (unchanged from the contract the app already speaks, so the frontend,
+its parseReceiptLine parser and the 74 JS tests need no edit):
 
     create_receipt(brief, work, evidence, agent)
     challenge(reason, evidence)
     adjudicate()
-    get_receipt() -> "Status: … | Agent: … | Brief: … | Work: … | <challenge> | Score: … | Reason: …"
+    get_receipt() -> "Status: ... | Agent: ... | Brief: ... | Work: ... | <challenge> | Score: ... | Reason: ..."
 
-It replaces a deployment whose adjudicate() called `gl.exec_prompt(...)` — an API
-the current GenVM does not have (`AttributeError: module 'genlayer.gl' has no
-attribute 'exec_prompt'`). That contract could never produce a verdict, which is
-why it sat at Status: EMPTY forever. It also made ONE un-consensused LLM call,
-so its result was a single model opinion rather than validator consensus.
+WHY THIS FILE EXISTS
+--------------------
+The previously deployed contract's adjudicate() called `gl.exec_prompt(...)`,
+which does not exist in the current GenVM, so it could never produce a verdict —
+that is why it sat at Status: EMPTY forever. It also made a single
+un-consensused LLM call, so "judged by GenLayer validators" was never true of
+it. This replaces it with a real validator-consensus judgement.
 
-Consensus model (Equivalence Principle, current GenLayer guidance)
-------------------------------------------------------------------
-An LLM call is non-deterministic, so `strict_eq` over the whole response —
-including free-form reasoning — would never reach agreement. Instead this uses
+RUNTIME IDIOM (current runner)
+------------------------------
+The current GenVM runner is not the legacy one:
+
+    import genlayer as gl          # `gl` is the package, NOT star-exported
+    from genlayer.types import *   # type aliases (u256, Address, ...)
+    class X(gl.contract.Contract)  # NOT gl.Contract
+    raise gl.vm.UserError(...)     # NOT gl.UserError
+
+The legacy form (`from genlayer import *` + `gl.Contract` + `gl.UserError`)
+still runs on the older node genvm but FAILS on this runner: `gl` is no longer
+star-exported, so the class body would raise NameError. If you ever target an
+older chain, that is the one thing to swap.
+
+CONSENSUS MODEL (Equivalence Principle)
+---------------------------------------
+An LLM call is non-deterministic, so exact-match consensus over the whole
+response — free-form reasoning included — would never agree. Instead this uses
 `gl.vm.run_nondet_unsafe`:
 
-  * the LEADER runs `judge()` and produces a ruling;
-  * every VALIDATOR re-runs `judge()` (its own LLM call) and accepts the leader
-    ONLY when the DECISION FIELDS agree — verdict, the booleans, the
+  * the LEADER runs judge() and produces a ruling;
+  * every VALIDATOR re-runs judge() (its own independent LLM call) and accepts
+    the leader ONLY when the DECISION FIELDS agree — verdict, the booleans, the
     requirement/risk lists and the score, order-normalized;
-  * free-form `reason` is excluded from the comparison (nodes word things
-    differently) and the leader's wording is the one stored — the same pattern
-    the docs' resolve_match example uses for non-compared `analysis`;
-  * a leader that returns malformed output makes the validator return False, so
-    the network rotates to another leader instead of committing garbage.
+  * free-form `reason` is excluded from the comparison (nodes word prose
+    differently); the leader's wording is the one stored;
+  * a failed leader, a non-ruling payload, or a malformed model response makes
+    the validator return False, so the network rotates to another leader rather
+    than committing garbage.
 
-Only AFTER consensus is reached does execution return to deterministic context
-and touch storage. The nondet block reads no storage and emits nothing.
+Storage is written only AFTER consensus, back in deterministic context. The
+nondet block reads no storage, emits nothing, and makes no contract calls — and
+never nests another nondet block.
 
-Verdict semantics
+VERDICT SEMANTICS
 -----------------
-The model is asked for the three-way AgentRef verdict — PASS / FAIL /
-PASS_WITH_MATERIAL_RISK — and the contract stores the app's two-state Status:
+The model answers with the three-way AgentRef verdict PASS / FAIL /
+PASS_WITH_MATERIAL_RISK. The contract stores the two on-chain statuses the app
+already parses as decided:
 
     FAIL                     -> NOT_VERIFIED
     PASS                     -> VERIFIED
     PASS_WITH_MATERIAL_RISK  -> VERIFIED, with the undisclosed risk named in
-                                Reason (the app has no third verdict state; a
-                                third on-chain Status would parse to no verdict
-                                at all and render as a blank result)
+                                Reason
 
-So a material-risk pass is never silently rounded up to a clean pass: the risk
-is carried in the Reason text the UI displays.
+verdictForStatus() in src/core/genlayer/contract.ts maps only
+VERIFIED|PASSED|PASS -> PASS and NOT_VERIFIED|FAILED|FAIL -> FAIL, else null. A
+literal third status PASS_WITH_MATERIAL_RISK would therefore parse to NO verdict
+and render blank, which is why a material-risk pass keeps VERIFIED and carries
+the risk in the Reason text the UI displays — never rounded up to a clean pass.
 
-Deploy target: Studio Next (chain id 61997), the chain this hackathon requires.
-The contract source is chain-agnostic — it uses only the current gl.nondet /
-gl.vm API, both of which exist on the Studio Next runtime. What is chain-
-specific is the APP side: the contract address and chain key in
-src/core/genlayer/contract.ts + config.ts. Deploying this file does NOT by
-itself retarget the app.
+Target: studio-dev / Studio Next (chain id 61997).
 """
 
-from genlayer import *  # noqa: F401,F403  (brings gl, TreeMap, Address, …)
 import json
 
-# The model's three-way verdict, and the app's two on-chain statuses.
+import genlayer as gl
+from genlayer.types import *  # noqa: F401,F403
+
+# The model's three-way verdict, and the contract's own state names.
 _ALLOWED_VERDICTS = ("PASS", "FAIL", "PASS_WITH_MATERIAL_RISK")
 _STATUS_EMPTY = "EMPTY"
 _STATUS_OPEN = "OPEN"
@@ -71,8 +86,8 @@ _STATUS_CHALLENGED = "CHALLENGED"
 _STATUS_VERIFIED = "VERIFIED"
 _STATUS_NOT_VERIFIED = "NOT_VERIFIED"
 
-# Decision fields validators MUST agree on. `reason` is excluded: it is
-# free-form prose and legitimately differs between nodes.
+# Decision fields validators MUST agree on. `reason` is deliberately excluded:
+# it is free-form prose and legitimately differs between nodes.
 _DECISION_KEYS = (
     "verdict",
     "brief_followed",
@@ -87,13 +102,13 @@ _SCHEMA_HINT = (
     "Return ONLY a JSON object with exactly these keys:\n"
     "{\n"
     '  "verdict": "PASS" | "FAIL" | "PASS_WITH_MATERIAL_RISK",\n'
-    '  "brief_followed": <bool>,          # did the work follow the original brief?\n'
-    '  "requirements_met": <bool>,        # were the explicit requirements satisfied?\n'
-    '  "material_risk_disclosed": <bool>, # were required material risks disclosed?\n'
-    '  "failed_requirements": [<str>],    # explicit requirement texts the work violated\n'
-    '  "missed_material_risks": [<str>],  # material-risk requirement texts left undisclosed\n'
-    '  "score": "<met>/<total>",          # e.g. "3/4" — requirements satisfied\n'
-    '  "reason": "<str>"                  # one sentence explaining WHY\n'
+    '  "brief_followed": <bool>,          // did the work follow the original brief?\n'
+    '  "requirements_met": <bool>,        // were the explicit requirements satisfied?\n'
+    '  "material_risk_disclosed": <bool>, // were required material risks disclosed?\n'
+    '  "failed_requirements": [<str>],    // explicit requirement texts the work violated\n'
+    '  "missed_material_risks": [<str>],  // material-risk requirement texts left undisclosed\n'
+    '  "score": "<met>/<total>",          // e.g. "3/4" — requirements satisfied\n'
+    '  "reason": "<str>"                  // one sentence explaining WHY\n'
     "}\n"
     "Rules: FAIL if the work violates an explicit requirement. "
     "PASS_WITH_MATERIAL_RISK if the work satisfies every requirement but omits a "
@@ -103,23 +118,50 @@ _SCHEMA_HINT = (
 )
 
 
+def _parse_json_object(raw):
+    """Pull a JSON object out of whatever the model actually returned.
+
+    `response_format="json"` normally yields a dict, but a runner may hand back
+    a string, and models habitually wrap JSON in ``` fences or a sentence of
+    preamble. Both are recovered here so a cosmetically noisy answer does not
+    cost the network a leader rotation.
+    """
+    if isinstance(raw, dict):
+        return raw
+    text = raw if isinstance(raw, str) else str(raw)
+    text = text.strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (``` or ```json), then any closing fence.
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rstrip()
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        # Last resort: the outermost {...} in the response.
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise Exception("adjudicator did not return a JSON object")
+        return json.loads(text[start:end + 1])
+
+
 def _coerce_ruling(raw) -> dict:
     """Normalize the model's response into the canonical ruling dict.
 
-    Raises on anything malformed: that turns the leader's result into an error,
-    every validator returns False, and the network rotates to a new leader
-    instead of persisting a bad ruling.
+    Raises on anything malformed. That is deliberate: the leader's result then
+    becomes an error, every validator returns False, and the network rotates to
+    a new leader instead of persisting a bogus verdict.
     """
-    obj = raw
-    if isinstance(raw, str):
-        obj = json.loads(raw)
+    obj = _parse_json_object(raw)
     if not isinstance(obj, dict):
         raise Exception("adjudicator did not return a JSON object")
 
     verdict = str(obj.get("verdict", "")).strip().upper()
     verdict = verdict.replace("PASS WITH MATERIAL RISK", "PASS_WITH_MATERIAL_RISK")
     if verdict not in _ALLOWED_VERDICTS:
-        raise Exception(f"invalid verdict: {verdict!r}")
+        raise Exception("invalid verdict: " + repr(verdict))
 
     def _bool(key) -> bool:
         value = obj.get(key, False)
@@ -135,8 +177,6 @@ def _coerce_ruling(raw) -> dict:
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
-    score = str(obj.get("score", "") or "").strip()
-
     return {
         "verdict": verdict,
         "brief_followed": _bool("brief_followed"),
@@ -144,7 +184,7 @@ def _coerce_ruling(raw) -> dict:
         "material_risk_disclosed": _bool("material_risk_disclosed"),
         "failed_requirements": _list("failed_requirements"),
         "missed_material_risks": _list("missed_material_risks"),
-        "score": score,
+        "score": str(obj.get("score", "") or "").strip(),
         "reason": str(obj.get("reason", "") or "").strip(),
     }
 
@@ -153,8 +193,8 @@ def _decision_fields(ruling):
     """Canonical string of the DECISION FIELDS ONLY — what validators compare.
 
     Lists are sorted so two nodes naming the same violated requirements in a
-    different order still agree. Non-dicts return None so a malformed leader
-    result can never compare equal to a valid one.
+    different order still agree. A non-dict returns None, so a leader that did
+    not return a ruling can never compare equal to a validator's real one.
     """
     if not isinstance(ruling, dict):
         return None
@@ -184,12 +224,12 @@ def _reason_for(ruling: dict) -> str:
         return reason
     risks = ruling.get("missed_material_risks") or []
     detail = "; ".join(risks) if risks else "a material risk the brief required be disclosed"
-    return f"Passed with material risk — undisclosed: {detail}. {reason}".strip()
+    return ("Passed with material risk — undisclosed: " + detail + ". " + reason).strip()
 
 
-class AgentRefReceipt(gl.Contract):
-    # Persistent state. One receipt at a time, as the app's single-receipt
-    # surface expects.
+class AgentRefReceipt(gl.contract.Contract):
+    # Persistent state. Declared in the class body with type annotations so it
+    # survives between calls. One receipt at a time, as the app expects.
     brief: str
     work: str
     evidence: str
@@ -200,6 +240,8 @@ class AgentRefReceipt(gl.Contract):
     score: str
     reason: str
 
+    # Constructor must stay private (no decorator). Takes no arguments, so
+    # Studio's Constructor Inputs pane will show none — deploy with "{}".
     def __init__(self):
         self.brief = ""
         self.work = ""
@@ -212,7 +254,7 @@ class AgentRefReceipt(gl.Contract):
         self.reason = ""
 
     @gl.public.write
-    def create_receipt(self, brief: str, work: str, evidence: str, agent: str):
+    def create_receipt(self, brief: str, work: str, evidence: str, agent: str) -> None:
         """Record the work under review. Clears any previous challenge/verdict."""
         self.brief = brief
         self.work = work
@@ -225,25 +267,29 @@ class AgentRefReceipt(gl.Contract):
         self.reason = ""
 
     @gl.public.write
-    def challenge(self, reason: str, evidence: str):
+    def challenge(self, reason: str, evidence: str) -> None:
         """Dispute the receipt. Requires an existing, not-yet-adjudicated receipt."""
         if self.status == _STATUS_EMPTY:
-            raise gl.UserError("no receipt to challenge — call create_receipt first")
-        if self.status in (_STATUS_VERIFIED, _STATUS_NOT_VERIFIED):
-            raise gl.UserError("this receipt has already been adjudicated")
+            raise gl.vm.UserError("no receipt to challenge - call create_receipt first")
+        if self.status == _STATUS_VERIFIED or self.status == _STATUS_NOT_VERIFIED:
+            raise gl.vm.UserError("this receipt has already been adjudicated")
         self.challenge_reason = reason
         self.challenge_evidence = evidence
         self.status = _STATUS_CHALLENGED
 
     def _prompt(self) -> str:
-        """The adjudication prompt. Reads storage — call ONLY in deterministic
-        context, before entering the nondet block."""
-        challenge = (
-            "Challenge reason: " + self.challenge_reason + "\n"
-            "Challenge evidence: " + self.challenge_evidence
-            if self.challenge_reason or self.challenge_evidence
-            else "This receipt was not challenged."
-        )
+        """Build the adjudication prompt.
+
+        Reads storage, so it must be called in DETERMINISTIC context — before
+        the nondet block, never inside it.
+        """
+        if self.challenge_reason or self.challenge_evidence:
+            challenge = (
+                "Challenge reason: " + self.challenge_reason + "\n"
+                "Challenge evidence: " + self.challenge_evidence
+            )
+        else:
+            challenge = "This receipt was not challenged."
         return (
             "You are an impartial adjudicator for AgentRef, a dispute-resolution "
             "protocol for AI work receipts. A requester submitted work against a "
@@ -257,15 +303,16 @@ class AgentRefReceipt(gl.Contract):
         )
 
     @gl.public.write
-    def adjudicate(self):
+    def adjudicate(self) -> None:
         """Rule on the receipt by GenLayer validator consensus.
 
         The leader and every validator each run the LLM independently; the
         ruling is accepted only when their decision fields agree.
         """
         if self.status == _STATUS_EMPTY:
-            raise gl.UserError("no receipt to adjudicate — call create_receipt first")
+            raise gl.vm.UserError("no receipt to adjudicate - call create_receipt first")
 
+        # Storage read BEFORE entering the nondet block.
         prompt = self._prompt()
 
         def judge() -> dict:
@@ -275,10 +322,10 @@ class AgentRefReceipt(gl.Contract):
             return _coerce_ruling(raw)
 
         def validator(leader_result) -> bool:
-            # The leader's outcome arrives wrapped in gl.vm.Return, or as a
-            # UserError/VMError when the leader failed.
+            # A leader that errored arrives as a UserError/VMError wrapper, not
+            # a Return — that must never count as agreement.
             if not isinstance(leader_result, gl.vm.Return):
-                return False  # leader failed — never agree; force a rotation
+                return False
             leader_fields = _decision_fields(leader_result.calldata)
             if leader_fields is None:
                 return False  # leader payload was not a ruling — never agree
@@ -290,7 +337,7 @@ class AgentRefReceipt(gl.Contract):
 
         agreed = gl.vm.run_nondet_unsafe(judge, validator)
 
-        # Consensus reached. Deterministic context — now it is safe to persist.
+        # Consensus reached. Back in deterministic context — safe to persist.
         self.status = _status_for(agreed["verdict"])
         self.score = agreed["score"]
         self.reason = _reason_for(agreed)
@@ -298,12 +345,16 @@ class AgentRefReceipt(gl.Contract):
     @gl.public.view
     def get_receipt(self) -> str:
         """The exact pipe-delimited line the app's parser expects."""
-        challenge_info = (
-            f"Challenge: {self.challenge_reason} | {self.challenge_evidence}"
-            if self.challenge_reason or self.challenge_evidence
-            else "No challenge"
-        )
+        if self.challenge_reason or self.challenge_evidence:
+            challenge_info = "Challenge: " + self.challenge_reason + " | " + self.challenge_evidence
+        else:
+            challenge_info = "No challenge"
         return (
-            f"Status: {self.status} | Agent: {self.agent} | Brief: {self.brief} | "
-            f"Work: {self.work} | {challenge_info} | Score: {self.score} | Reason: {self.reason}"
+            "Status: " + self.status
+            + " | Agent: " + self.agent
+            + " | Brief: " + self.brief
+            + " | Work: " + self.work
+            + " | " + challenge_info
+            + " | Score: " + self.score
+            + " | Reason: " + self.reason
         )

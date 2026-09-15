@@ -3,21 +3,29 @@
 Two layers, deliberately:
 
 1. `python3 tests/genlayer/single_receipt.test.py` — runs ANYWHERE python3
-   exists, with no GenLayer tooling. It installs a small stub `genlayer` module
-   so the contract imports, then drives the REAL judgment path: `adjudicate()`
-   end to end (leader → validator → consensus → storage) plus the pure helpers
-   that decide agreement. The consensus-critical logic is exactly the part most
-   likely to be wrong, so it should not be untestable without a testnet.
+   exists, with no GenLayer tooling. It installs a stub `genlayer` package (with
+   a `contract` submodule, `types`, `public`, `nondet` and `vm`) so the contract
+   imports exactly as it does on the real runner, then drives the REAL judgment
+   path: adjudicate() end to end (leader -> validator -> consensus -> storage)
+   plus the pure helpers that decide agreement. The consensus-critical logic is
+   the part most likely to be wrong, so it should not be untestable without a
+   testnet.
 
 2. `@harness` tests — for the official genlayer-test VM, which adds what the
    stub cannot: real nondeterminism, real validator rotation, real storage
-   semantics. Not run in this repo's sandbox (it has no python3 or genlayer
-   CLI). Invocation per your CLI version, e.g. `genlayer test <contract>`.
+   semantics. NOT run in this repo's sandbox (no python3, no genlayer CLI).
+
+The stub mirrors the CURRENT runner idiom, not the legacy one: `gl` is the
+package (`import genlayer as gl`), the base is `gl.contract.Contract`, and the
+error is `gl.vm.UserError`. If the contract were written with the legacy
+`from genlayer import *` + `gl.Contract`, this stub would fail it the same way
+the real runner would.
 
 Why the stub can prove anything: the contract's validators compare the DECISION
 FIELDS of a ruling, not the raw LLM text. That comparison is pure string
 normalization, so a deterministic stub model exercises every branch of it.
 """
+import ast
 import importlib
 import json
 import os
@@ -32,7 +40,7 @@ CONTRACT_PATH = os.path.join(
 
 
 # --------------------------------------------------------------------------
-# Stub genlayer module — enough to import the contract and run its logic.
+# Stub `genlayer` package — enough to import the contract and run its logic.
 # --------------------------------------------------------------------------
 class _Decorator:
     def __call__(self, fn):
@@ -57,22 +65,23 @@ class _Return:
 
 class _Vm:
     Return = _Return
+    UserError = _UserError
 
     #: The ruling the stubbed model returns for the NEXT exec_prompt call.
     next_result = None
     #: Every prompt the contract has sent, in order.
     prompts = []
-    #: How many times run_nondet_unsafe had to rotate leaders before agreement.
+    #: Which leader attempt the last run_nondet_unsafe got agreement on.
     rotations = 0
 
     @classmethod
     def run_nondet_unsafe(cls, leader_fn, validator_fn):
-        """Faithful-enough stand-in for the VM's consensus loop.
+        """Stand-in for the VM's consensus loop.
 
         Runs the leader, hands the validator a gl.vm.Return, and — like the real
         network — retries with a new leader when the validator refuses. Raises
-        if no leader can ever be agreed on, which is what a contract that can
-        never reach consensus must do rather than commit a bad ruling.
+        if no leader can ever be agreed on, which is what a contract that cannot
+        reach consensus must do rather than commit a bad ruling.
         """
         for attempt in range(3):
             cls.rotations = attempt
@@ -98,25 +107,37 @@ class _Nondet:
 
 
 def _install_stub_genlayer():
-    """Register a stub `genlayer` module so the contract imports without the VM."""
-    mod = types.ModuleType("genlayer")
-    gl = types.SimpleNamespace(
-        Contract=type("Contract", (), {}),
-        public=_Public(),
-        UserError=_UserError,
-        nondet=_Nondet(),
-        vm=_Vm(),
-    )
-    mod.gl = gl
-    sys.modules["genlayer"] = mod
-    return mod
+    """Register a stub `genlayer` package so the contract imports unmodified."""
+    pkg = types.ModuleType("genlayer")
+    pkg.__path__ = []  # mark as a package so `from genlayer.types import *` works
+
+    contract_mod = types.ModuleType("genlayer.contract")
+
+    class _Contract:
+        pass
+
+    contract_mod.Contract = _Contract
+
+    types_mod = types.ModuleType("genlayer.types")
+
+    vm = _Vm()
+    pkg.contract = contract_mod
+    pkg.types = types_mod
+    pkg.public = _Public()
+    pkg.nondet = _Nondet()
+    pkg.vm = vm
+
+    sys.modules["genlayer"] = pkg
+    sys.modules["genlayer.contract"] = contract_mod
+    sys.modules["genlayer.types"] = types_mod
+    return pkg
 
 
-_install_stub_genlayer()
+_genlayer = _install_stub_genlayer()
 
 sys.path.insert(0, os.path.dirname(CONTRACT_PATH))
 contract = importlib.import_module(os.path.splitext(os.path.basename(CONTRACT_PATH))[0])
-gl = sys.modules["genlayer"].gl
+gl = _genlayer
 
 
 PASS_RULING = {
@@ -154,7 +175,7 @@ RISK_RULING = {
 
 
 def _fresh(ruling):
-    """A contract with a receipt filed, and the model primed to return `ruling`."""
+    """A contract with a receipt filed and challenged, model primed for `ruling`."""
     _Vm.prompts = []
     _Vm.next_result = ruling
     c = contract.AgentRefReceipt()
@@ -169,10 +190,76 @@ def _fresh(ruling):
 
 
 # --------------------------------------------------------------------------
-# get_receipt() — the contract the frontend parser depends on
+# The contract must use the CURRENT runner idiom, not the legacy one
+# --------------------------------------------------------------------------
+def test_contract_extends_the_package_contract_base():
+    """gl.contract.Contract — not gl.Contract. The legacy base would NameError
+    on the current runner because `gl` is no longer star-exported."""
+    assert issubclass(contract.AgentRefReceipt, gl.contract.Contract)
+
+
+def _contract_ast():
+    """Parse the contract with ast — the closest thing to a compile check."""
+    with open(CONTRACT_PATH, encoding="utf-8") as fh:
+        return ast.parse(fh.read(), filename=CONTRACT_PATH)
+
+
+def test_contract_parses_as_python():
+    """A SyntaxError here means the file would not even deploy."""
+    _contract_ast()
+
+
+def test_contract_uses_the_current_import_idiom():
+    """`from genlayer import *` would not bind `gl` on the current runner.
+
+    Checked via the AST, not a substring search: the module docstring quotes the
+    legacy form when explaining why it is wrong.
+    """
+    tree = _contract_ast()
+    star_imports = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.ImportFrom) and n.module == "genlayer"
+        and any(a.name == "*" for a in n.names)
+    ]
+    assert star_imports == [], "from genlayer import * does not bind `gl` on the current runner"
+    gl_imports = [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Import) and any(a.name == "genlayer" and a.asname == "gl" for a in n.names)
+    ]
+    assert gl_imports, "expected `import genlayer as gl`"
+
+
+def test_contract_header_pins_a_runner_hash_on_the_first_lines():
+    with open(CONTRACT_PATH, encoding="utf-8") as fh:
+        head = fh.read(400)
+    assert "py-genlayer:" in head
+    assert '"Depends"' in head
+
+
+def test_no_float_literals_in_the_contract():
+    """The linter rejects floats in contracts — persisted values must be exact."""
+    tree = _contract_ast()
+    floats = [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, float)]
+    assert floats == []
+
+
+def test_no_banned_module_imports():
+    """The linter forbids random/os/sys/subprocess and friends."""
+    tree = _contract_ast()
+    banned = {"random", "os", "sys", "subprocess", "time", "socket", "shutil"}
+    used = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            used.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            used.add(node.module.split(".")[0])
+    assert not (used & banned), "banned imports: " + repr(sorted(used & banned))
+
+
+# --------------------------------------------------------------------------
+# get_receipt() — the exact line the frontend parser depends on
 # --------------------------------------------------------------------------
 def test_empty_receipt_line_matches_the_frontend_parser():
-    """The exact byte sequence `parseReceiptLine` was written against."""
     c = contract.AgentRefReceipt()
     assert c.get_receipt() == "Status: EMPTY | Agent:  | Brief:  | Work:  | No challenge | Score:  | Reason: "
 
@@ -205,17 +292,12 @@ def test_adjudicate_reaches_consensus_not_a_single_opinion():
     """The validator must re-run the judgement — one LLM call is not consensus."""
     c = _fresh(PASS_RULING)
     c.adjudicate()
-    # leader + at least one independent validator each asked the model:
-    assert len(_Vm.prompts) >= 2
+    assert len(_Vm.prompts) >= 2, "leader + at least one independent validator"
     assert _Vm.rotations == 0
 
 
 def test_validator_agrees_despite_differently_worded_reasoning():
-    """Nodes phrase prose differently; that must NOT break consensus.
-
-    The stub returns a ruling whose `reason` differs from the leader's — the
-    real-world case the decision-field comparison exists to tolerate.
-    """
+    """Nodes phrase prose differently; that must NOT break consensus."""
     leader = dict(PASS_RULING, reason="Leader wording.")
     validator = dict(PASS_RULING, reason="A totally different sentence.")
     assert contract._decision_fields(leader) == contract._decision_fields(validator)
@@ -289,6 +371,43 @@ def test_adjudicate_rejects_an_out_of_vocabulary_verdict():
 
 
 # --------------------------------------------------------------------------
+# Robustness of the model-response parsing
+# --------------------------------------------------------------------------
+def test_fenced_json_is_recovered():
+    """Models wrap JSON in ``` fences — that must not cost a leader rotation."""
+    fenced = "```json\n" + json.dumps(PASS_RULING) + "\n```"
+    assert contract._coerce_ruling(fenced)["verdict"] == "PASS"
+
+
+def test_bare_fenced_json_is_recovered():
+    fenced = "```\n" + json.dumps(PASS_RULING) + "\n```"
+    assert contract._coerce_ruling(fenced)["verdict"] == "PASS"
+
+
+def test_json_with_preamble_is_recovered():
+    noisy = "Sure, here is the ruling:\n" + json.dumps(FAIL_RULING) + "\nHope that helps!"
+    assert contract._coerce_ruling(noisy)["verdict"] == "FAIL"
+
+
+def test_fenced_and_preamble_agree_with_the_bare_object():
+    """All three spellings must normalize to the SAME decision fields, or two
+    honest nodes would disagree purely over formatting."""
+    bare = contract._decision_fields(contract._coerce_ruling(PASS_RULING))
+    fenced = contract._decision_fields(contract._coerce_ruling("```json\n" + json.dumps(PASS_RULING) + "\n```"))
+    noisy = contract._decision_fields(contract._coerce_ruling("Here you go: " + json.dumps(PASS_RULING)))
+    assert bare == fenced == noisy
+
+
+def test_unparseable_response_raises():
+    raised = False
+    try:
+        contract._coerce_ruling("no json here at all")
+    except Exception:
+        raised = True
+    assert raised
+
+
+# --------------------------------------------------------------------------
 # The three-way verdict collapsing onto the app's two on-chain statuses
 # --------------------------------------------------------------------------
 def test_material_risk_pass_is_verified_but_keeps_the_risk_visible():
@@ -308,7 +427,7 @@ def test_cannot_challenge_before_a_receipt_exists():
     raised = False
     try:
         c.challenge("too early", "")
-    except gl.UserError:
+    except gl.vm.UserError:
         raised = True
     assert raised
 
@@ -318,7 +437,7 @@ def test_cannot_adjudicate_before_a_receipt_exists():
     raised = False
     try:
         c.adjudicate()
-    except gl.UserError:
+    except gl.vm.UserError:
         raised = True
     assert raised
 
@@ -329,7 +448,7 @@ def test_cannot_challenge_an_already_adjudicated_receipt():
     raised = False
     try:
         c.challenge("again", "")
-    except gl.UserError:
+    except gl.vm.UserError:
         raised = True
     assert raised
 
@@ -367,12 +486,12 @@ def test_unchallenged_receipt_says_so_in_the_prompt():
 
 
 # --------------------------------------------------------------------------
-# @harness — needs the real genlayer-test VM (not run in this repo)
+# @harness — needs the real genlayer-test VM (NOT run in this repo)
 # --------------------------------------------------------------------------
-# The stub above proves the LOGIC; only the real VM proves the VM INTEGRATION:
-# that gl.nondet.exec_prompt is reachable inside a nondet block on the target
-# chain, that storage writes after run_nondet_unsafe are permitted, and that
-# the validator is really invoked per node. Run these on a machine with the CLI.
+# The stub above proves the LOGIC. Only the real VM proves the VM INTEGRATION:
+# that gl.nondet.exec_prompt is reachable inside a nondet block on studio-dev,
+# that storage writes after run_nondet_unsafe are permitted, and that the
+# validator is really invoked per node. Run these where the CLI exists.
 #
 #   from genlayer_test import direct_vm
 #   from single_receipt import AgentRefReceipt
@@ -401,9 +520,9 @@ if __name__ == "__main__":
     for name, fn in tests:
         try:
             fn()
-            print(f"  ok   {name}")
+            print("  ok   " + name)
         except Exception as exc:
             failures += 1
-            print(f"  FAIL {name}: {type(exc).__name__}: {exc}")
-    print(f"\n{len(tests) - failures}/{len(tests)} passed")
+            print("  FAIL " + name + ": " + type(exc).__name__ + ": " + str(exc))
+    print("\n" + str(len(tests) - failures) + "/" + str(len(tests)) + " passed")
     sys.exit(1 if failures else 0)
