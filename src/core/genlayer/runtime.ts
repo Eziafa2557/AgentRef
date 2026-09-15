@@ -5,7 +5,7 @@
  * using the real, installed genlayer-js SDK:
  *
  *   adjudicateOnChain(): create_receipt → challenge → adjudicate (writes,
- *     signed by AGENTREF_ACCOUNT_PRIVATE_KEY, each awaited to FINALIZED).
+ *     signed by AGENTBEE_ACCOUNT_PRIVATE_KEY, each awaited to FINALIZED).
  *   readOnChainReceipt(): get_receipt() → parsed Status / Score / Reason.
  *     Reading needs NO key — the address is public.
  *
@@ -33,7 +33,7 @@ import {
   type Hash,
 } from "genlayer-js/types";
 
-import { getGenLayerAccount, getGenLayerConfig } from "./config";
+import { SIGNER_KEY_ENV_VARS, getGenLayerAccount, getGenLayerConfig } from "./config";
 import { explorerTxUrl, parseReceiptLine, statusIsDecided, type OnchainReceiptRecord } from "./contract";
 
 export type GenLayerOutcome =
@@ -58,7 +58,7 @@ function asAddress(addr: string): `0x${string}` {
 
 function asPrivateKey(key: string): `0x${string}` {
   if (!PRIVATE_KEY_RE.test(key)) {
-    throw new Error("AGENTREF_ACCOUNT_PRIVATE_KEY must be a 64-hex 0x private key.");
+    throw new Error(`${SIGNER_KEY_ENV_VARS[0]} must be a 64-hex 0x private key.`);
   }
   return key as `0x${string}`;
 }
@@ -178,7 +178,7 @@ export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerO
     return {
       status: "not-configured",
       reason:
-        "This deployment has no signer key (AGENTREF_ACCOUNT_PRIVATE_KEY), so it cannot sign the on-chain writes. " +
+        `This deployment has no signer key (${SIGNER_KEY_ENV_VARS[0]}), so it cannot sign the on-chain writes. ` +
         "Set it server-side only (see .env.example) to adjudicate — or use the read-only path, which needs no key.",
     };
   }

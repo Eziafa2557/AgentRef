@@ -24,6 +24,7 @@ const GL_ENV_KEYS = [
   "AGENTREF_CONTRACT_ADDRESS",
   "AGENTREF_NETWORK",
   "AGENTREF_CHAIN_KEY",
+  "AGENTBEE_ACCOUNT_PRIVATE_KEY",
   "AGENTREF_ACCOUNT_PRIVATE_KEY",
   "AGENTREF_ACCOUNT_NAME",
 ];
@@ -110,7 +111,7 @@ describe("adjudicationCapability", () => {
   it("reports the WRITE path unavailable without a signer key, and says why", () => {
     const cap = adjudicationCapability({ accountName: "agentref" });
     assert.equal(cap.canAdjudicate, false);
-    assert.match(cap.reason, /AGENTREF_ACCOUNT_PRIVATE_KEY/);
+    assert.match(cap.reason, /AGENTBEE_ACCOUNT_PRIVATE_KEY/);
   });
 
   it("rejects a malformed key rather than attempting to sign with it", () => {
@@ -134,6 +135,29 @@ describe("adjudicationCapability", () => {
       restoreGenLayerEnv(saved);
     }
   });
+
+  it("honours AGENTBEE_ACCOUNT_PRIVATE_KEY — the name production sets", () => {
+    const saved = clearGenLayerEnv();
+    try {
+      process.env.AGENTBEE_ACCOUNT_PRIVATE_KEY = `0x${"c".repeat(64)}`;
+      const cap = adjudicationCapability();
+      assert.equal(cap.canAdjudicate, true);
+      assert.equal(getGenLayerAccount().privateKey, `0x${"c".repeat(64)}`);
+    } finally {
+      restoreGenLayerEnv(saved);
+    }
+  });
+
+  it("prefers AGENTBEE over the legacy AGENTREF name when both are set", () => {
+    const saved = clearGenLayerEnv();
+    try {
+      process.env.AGENTREF_ACCOUNT_PRIVATE_KEY = `0x${"d".repeat(64)}`;
+      process.env.AGENTBEE_ACCOUNT_PRIVATE_KEY = `0x${"e".repeat(64)}`;
+      assert.equal(getGenLayerAccount().privateKey, `0x${"e".repeat(64)}`);
+    } finally {
+      restoreGenLayerEnv(saved);
+    }
+  });
 });
 
 describe("runtime (real genlayer-js import, no env)", () => {
@@ -148,7 +172,7 @@ describe("runtime (real genlayer-js import, no env)", () => {
         evidence: [{ label: "excerpt", content: "some evidence" }],
       });
       assert.equal(out.status, "not-configured");
-      if (out.status === "not-configured") assert.match(out.reason, /AGENTREF_ACCOUNT_PRIVATE_KEY/);
+      if (out.status === "not-configured") assert.match(out.reason, /AGENTBEE_ACCOUNT_PRIVATE_KEY/);
     } finally {
       restoreGenLayerEnv(saved);
     }

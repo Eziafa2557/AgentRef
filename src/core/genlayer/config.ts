@@ -8,7 +8,8 @@
  *
  * ADJUDICATING (create_receipt → challenge → adjudicate, i.e. writes) needs a
  * funded account server-side, set in env only:
- *   AGENTREF_ACCOUNT_PRIVATE_KEY   server-only signer key (never exposed)
+ *   AGENTBEE_ACCOUNT_PRIVATE_KEY   server-only signer key (never exposed)
+ *   AGENTREF_ACCOUNT_PRIVATE_KEY   legacy name, still honoured (checked second)
  *
  * Env reference (see .env.example):
  *   NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS   overrides the default live address
@@ -85,10 +86,32 @@ export interface GenLayerAccount {
   accountName: string;
 }
 
+/**
+ * Env var names for the server-only signer key, in priority order.
+ *
+ * AGENTBEE_ACCOUNT_PRIVATE_KEY is the name the production deployment sets;
+ * AGENTREF_ACCOUNT_PRIVATE_KEY is the older name and is still honoured, so an
+ * existing deployment keeps signing without any env change.
+ */
+export const SIGNER_KEY_ENV_VARS = [
+  "AGENTBEE_ACCOUNT_PRIVATE_KEY",
+  "AGENTREF_ACCOUNT_PRIVATE_KEY",
+] as const;
+
+/** First non-empty key among SIGNER_KEY_ENV_VARS, else undefined. */
+export function signerKeyFrom(env: NodeJS.ProcessEnv | undefined): string | undefined {
+  if (!env) return undefined;
+  for (const name of SIGNER_KEY_ENV_VARS) {
+    const value = env[name]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
 export function getGenLayerAccount(): GenLayerAccount {
   const env = serverEnv();
   return {
-    privateKey: env?.AGENTREF_ACCOUNT_PRIVATE_KEY,
+    privateKey: signerKeyFrom(env),
     chainKey: env?.AGENTREF_CHAIN_KEY?.trim(),
     accountName: env?.AGENTREF_ACCOUNT_NAME?.trim() || "agentref",
   };
@@ -115,13 +138,13 @@ export function adjudicationCapability(account: GenLayerAccount = getGenLayerAcc
     return {
       canAdjudicate: false,
       reason:
-        "This deployment has no signer key (AGENTREF_ACCOUNT_PRIVATE_KEY), so it cannot sign the on-chain writes.",
+        `This deployment has no signer key (${SIGNER_KEY_ENV_VARS[0]}), so it cannot sign the on-chain writes.`,
     };
   }
   if (!PRIVATE_KEY_RE.test(key)) {
     return {
       canAdjudicate: false,
-      reason: "AGENTREF_ACCOUNT_PRIVATE_KEY is not a 0x-prefixed 64-hex private key.",
+      reason: `${SIGNER_KEY_ENV_VARS[0]} is not a 0x-prefixed 64-hex private key.`,
     };
   }
   return { canAdjudicate: true, reason: "A server-side signer key is configured." };
