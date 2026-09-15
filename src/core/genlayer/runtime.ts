@@ -21,7 +21,9 @@
  *     that, because simulation does not charge fees.
  *   - waitForTransactionReceipt({ hash, waitUntil: "finalized", interval, retries })
  *   - readContract({ ..., transactionHashVariant: TransactionHashVariant.LATEST_FINAL })
- *   - isSuccessful(transaction) judges success (exported only from >= 2.0.0-rc.1)
+ *   - isSuccessful(transaction) judges success (exported only from >= 2.0.0-rc.1).
+ *     It is the ONLY success check used — see writeSucceeded below for why a
+ *     statusName guard must not be layered on top of it.
  *   - getContractSchema(address) — a POSITIONAL argument — verifies the contract
  *     surface we are about to call, so a mis-pointed address is reported rather
  *     than silently read.
@@ -33,7 +35,6 @@ import { createAccount, createClient, isSuccessful } from "genlayer-js";
 import { localnet, studioDevnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
 import {
   TransactionHashVariant,
-  TransactionStatus,
   type GenLayerTransaction,
   type Hash,
 } from "genlayer-js/types";
@@ -97,15 +98,25 @@ function pickChain(chainKey: string): { ok: true; chain: (typeof CHAINS)[ChainKe
 /**
  * Whether a write that reached FINALIZED actually succeeded.
  *
- * `isSuccessful` is the SDK's own judgement (exported from genlayer-js >=
- * 2.0.0-rc.1). The FINALIZED check stays: a transaction can be finalized with
- * its execution having reverted, and a reverted write must never be reported as
- * a verdict. Replacing the old statusName/txExecutionResultName hand-roll with
- * the SDK's own predicate removes a place where our guess could drift from the
- * protocol.
+ * A transaction can be finalized with its execution having reverted, and a
+ * reverted write must never be reported as a verdict — so this is checked
+ * explicitly. `isSuccessful` is the SDK's own judgement of that, and it is the
+ * ONLY check here.
+ *
+ * Do not add a `receipt.statusName === FINALIZED` guard alongside it. It reads
+ * as harmless belt-and-braces and it is not: `waitForTransactionReceipt`
+ * returns a *simplified* receipt by default, and that shape drops `statusName`
+ * while keeping the numeric `status` (observed on Studio Dev: `status=7`,
+ * `statusName=undefined`, `txExecutionResultName="FINISHED_WITH_RETURN"`). A
+ * statusName guard therefore evaluates undefined-because-absent as
+ * not-finalized and fails every genuinely successful write. `isSuccessful`
+ * resolves the status itself — including the numeric form — so deferring to it
+ * is both correct and the one place this judgement should live.
+ *
+ * Finalization itself needs no check: the `waitUntil: "finalized"` wait above
+ * only returns once the transaction has reached it.
  */
-function finalizedSucceeded(receipt: GenLayerTransaction): boolean {
-  if (receipt.statusName !== TransactionStatus.FINALIZED) return false;
+export function writeSucceeded(receipt: GenLayerTransaction): boolean {
   return isSuccessful(receipt);
 }
 
@@ -186,9 +197,10 @@ async function writeAndWait(
     );
   }
 
-  if (!finalizedSucceeded(receipt)) {
+  if (!writeSucceeded(receipt)) {
     throw new Error(
-      `${functionName} did not succeed. statusName=${receipt.statusName ?? "?"}, txExecutionResultName=${receipt.txExecutionResultName ?? "?"} (tx ${txHash}).`
+      `${functionName} did not succeed. status=${receipt.status ?? "?"} (${receipt.statusName ?? "no statusName"}), ` +
+        `txExecutionResult=${receipt.txExecutionResult ?? "?"} (${receipt.txExecutionResultName ?? "no txExecutionResultName"}) (tx ${txHash}).`
     );
   }
   return txHash as string;
