@@ -139,6 +139,63 @@ export function evidenceText(items: Array<{ label?: string; content?: string }> 
     .join("\n\n");
 }
 
+/** How long to keep polling a single write for finalization before giving up on it. */
+const FINALIZATION_BUDGET_MS = 90_000;
+const POLL_INTERVAL_MS = 5_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Wait for a submitted write to reach FINALIZED, tolerating a flaky poll.
+ *
+ * `waitForTransactionReceipt` abandons the wait on the FIRST RPC error, and the
+ * Studio RPC intermittently answers a poll with an HTML error page instead of
+ * JSON — surfacing as `Unexpected token '<', "<!DOCTYPE "... is not valid JSON`.
+ * Observed in production: the `adjudicate` write had been submitted and went on
+ * to FINALIZE with FINISHED_WITH_RETURN, and the live contract did reach
+ * NOT_VERIFIED, while the route told the user the adjudication had failed.
+ *
+ * A poll that errors says nothing about the transaction, so it must not be
+ * believed. `retries: 1` keeps the SDK owning the status judgement while this
+ * loop owns tolerance for transport errors.
+ *
+ * The budget is per write and deliberately under a third of the route's 300s
+ * `maxDuration`: three writes that all burn their full budget stay inside the
+ * function's declared limit instead of being killed mid-response.
+ */
+export async function waitForFinalized(
+  client: ReturnType<typeof createClient>,
+  txHash: string,
+  functionName: string,
+  opts: { intervalMs?: number; budgetMs?: number } = {}
+): Promise<GenLayerTransaction> {
+  const intervalMs = opts.intervalMs ?? POLL_INTERVAL_MS;
+  const budgetMs = opts.budgetMs ?? FINALIZATION_BUDGET_MS;
+  const deadline = Date.now() + budgetMs;
+  let lastMessage = "";
+  for (;;) {
+    try {
+      return await client.waitForTransactionReceipt({
+        hash: txHash as Hash,
+        waitUntil: "finalized", // `status` is deprecated in genlayer-js >= 2.0.0-rc.1
+        interval: intervalMs,
+        retries: 1,
+      });
+    } catch (e) {
+      lastMessage = e instanceof Error ? e.message : String(e);
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `${functionName} was submitted (${txHash}) but finalization could not be confirmed within ` +
+          `${Math.round(budgetMs / 1000)}s (last poll error: ${lastMessage}). ` +
+          "That is a failure to CONFIRM, not proof the write failed — a submitted write can still finalize. " +
+          "Check the transaction on the explorer, and re-read the receipt to see the contract's real state."
+      );
+    }
+    await sleep(intervalMs);
+  }
+}
+
 async function writeAndWait(
   client: ReturnType<typeof createClient>,
   contractAddress: `0x${string}`,
@@ -182,20 +239,7 @@ async function writeAndWait(
     throw new Error(`${functionName} did not return a transaction id.`);
   }
 
-  let receipt: GenLayerTransaction;
-  try {
-    receipt = await client.waitForTransactionReceipt({
-      hash: txHash as Hash,
-      waitUntil: "finalized", // `status` is deprecated in genlayer-js >= 2.0.0-rc.1
-      interval: 5_000,
-      retries: 120, // up to ~10 min: consensus runs real validators
-    });
-  } catch (e) {
-    throw new Error(
-      `${functionName} was submitted (${txHash}) but finalization timed out: ${e instanceof Error ? e.message : String(e)}. ` +
-        "The contract may still finalize — check the transaction on the explorer."
-    );
-  }
+  const receipt = await waitForFinalized(client, txHash, functionName);
 
   if (!writeSucceeded(receipt)) {
     throw new Error(

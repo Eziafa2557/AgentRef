@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 
 import type { GenLayerTransaction } from "genlayer-js/types";
 
-import { writeSucceeded } from "./runtime";
+import { waitForFinalized, writeSucceeded } from "./runtime";
 
 /** `status` is the enum INDEX on the wire: FINALIZED=7, ACCEPTED=5. */
 const asReceipt = (fields: Record<string, unknown>): GenLayerTransaction =>
@@ -83,5 +83,65 @@ describe("writeSucceeded — the on-chain write success check", () => {
 
   it("rejects a receipt carrying no status at all rather than guessing success", () => {
     assert.equal(writeSucceeded(asReceipt({ txExecutionResultName: "FINISHED_WITH_RETURN" })), false);
+  });
+});
+
+/**
+ * A poll that errors says nothing about the transaction, so it must not be
+ * believed. This is the second production false negative: the adjudicate write
+ * was submitted and went on to FINALIZE with FINISHED_WITH_RETURN while the RPC
+ * answered a poll with an HTML error page, and the route reported the
+ * adjudication as failed.
+ */
+describe("waitForFinalized — tolerating a flaky poll", () => {
+  const FAST = { intervalMs: 1, budgetMs: 5_000 };
+  const FINALIZED = asReceipt(SIMPLIFIED_FINALIZED_RETURN);
+
+  it("retries past a transient RPC error instead of reporting the write as failed", async () => {
+    let calls = 0;
+    const client = {
+      waitForTransactionReceipt: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error(`Unexpected token '<', "<!DOCTYPE "... is not valid JSON`);
+        return FINALIZED;
+      },
+    };
+
+    const receipt = await waitForFinalized(client as never, "0xabc", "adjudicate", FAST);
+
+    assert.equal(calls, 2, "it should have polled again after the error");
+    assert.equal(writeSucceeded(receipt), true);
+  });
+
+  it("returns without an extra poll when the write is already finalized", async () => {
+    let calls = 0;
+    const client = {
+      waitForTransactionReceipt: async () => {
+        calls += 1;
+        return FINALIZED;
+      },
+    };
+
+    await waitForFinalized(client as never, "0xabc", "create_receipt", FAST);
+    assert.equal(calls, 1);
+  });
+
+  it("gives up once the budget is spent, and says it is a failure to CONFIRM", async () => {
+    const client = {
+      waitForTransactionReceipt: async () => {
+        throw new Error("HTML error page");
+      },
+    };
+
+    await assert.rejects(
+      () => waitForFinalized(client as never, "0xdeadbeef", "challenge", { intervalMs: 1, budgetMs: 25 }),
+      (e: Error) => {
+        assert.match(e.message, /could not be confirmed/);
+        // It must not claim the write failed — it only failed to confirm it.
+        assert.match(e.message, /failure to CONFIRM, not proof the write failed/);
+        assert.match(e.message, /0xdeadbeef/);
+        return true;
+      }
+    );
   });
 });
