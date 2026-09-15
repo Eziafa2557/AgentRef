@@ -14,7 +14,11 @@
  *
  * Verified against the installed `genlayer-js@2.0.0-rc.1` types:
  *   - createClient({ chain, account }) / createAccount(privateKey)
- *   - writeContract({ address, functionName, args, value })  (value REQUIRED for a non-payable write)
+ *   - estimateTransactionFeesForWrite({ address, functionName, args, value })
+ *     then writeContract({ address, functionName, args, value: 0n, fees })
+ *     — the fee is NOT optional: a write without one is rejected by the chain
+ *     with `FeeValueMustBeNonZero`, and simulateWriteContract will not reveal
+ *     that, because simulation does not charge fees.
  *   - waitForTransactionReceipt({ hash, waitUntil: "finalized", interval, retries })
  *   - readContract({ ..., transactionHashVariant: TransactionHashVariant.LATEST_FINAL })
  *   - isSuccessful(transaction) judges success (exported only from >= 2.0.0-rc.1)
@@ -130,11 +134,37 @@ async function writeAndWait(
   functionName: string,
   args: string[]
 ): Promise<string> {
+  // Quote the protocol fee for this exact call before signing it.
+  //
+  // A write with no fee is REJECTED by the chain — the node answers
+  // `FeeValueMustBeNonZero(1)` and the transaction reverts. That failure is
+  // invisible to simulateWriteContract, which does not charge fees, so a
+  // simulation passing proves nothing about whether the real write will be
+  // accepted; the estimate below is what makes the write payable.
+  const fees = await client
+    .estimateTransactionFeesForWrite({
+      address: contractAddress,
+      functionName,
+      args,
+      value: 0n,
+    })
+    .catch((e: unknown) => {
+      throw new Error(
+        `Could not quote the network fee for ${functionName}: ${e instanceof Error ? e.message : String(e)}. ` +
+          "The write was NOT submitted."
+      );
+    });
+
   const txHash = (await client.writeContract({
     address: contractAddress,
     functionName,
     args,
-    value: 0n, // required by genlayer-js 1.1.8 for a non-payable write
+    value: 0n, // no native token is transferred; the protocol fee is `fees` below
+    fees: {
+      distribution: fees.distribution,
+      messageAllocations: fees.messageAllocations,
+      feeValue: fees.feeValue,
+    },
   })) as `0x${string}`;
 
   if (typeof txHash !== "string" || !txHash.startsWith("0x")) {
