@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
  *   - the WRITE path (create_receipt → challenge → adjudicate) needs a funded
  *     server-side signer key
  *
- * Only the boolean + a reason cross the wire; AGENTBEE_ACCOUNT_PRIVATE_KEY
+ * Only the boolean + a reason cross the wire; AGENTREF_ACCOUNT_PRIVATE_KEY
  * never leaves the server.
  */
 export async function GET() {

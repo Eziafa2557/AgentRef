@@ -204,7 +204,7 @@ export type GenLayerConfigStatus =
   | {
       kind: "ready";
       network: string;
-      /** genlayer-js/chains export name (e.g. "studioDevnet"). */
+      /** genlayer-js/chains export name (e.g. "testnetBradbury"). */
       chainKey: string;
       contractAddress: string;
       chainLabel: string;

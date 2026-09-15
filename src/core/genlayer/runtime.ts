@@ -1,35 +1,30 @@
 /**
  * GenLayer runtime — the REAL adjudication path (server-only).
  *
- * Talks to the deployed single-receipt Intelligent Contract (see ./contract.ts)
- * on **GenLayer Studio Next** (chain 61997) using the real, installed
- * genlayer-js SDK:
+ * Talks to the LIVE single-receipt Intelligent Contract (see ./contract.ts)
+ * using the real, installed genlayer-js SDK:
  *
  *   adjudicateOnChain(): create_receipt → challenge → adjudicate (writes,
- *     signed by the server-only signer key, each awaited to FINALIZED).
+ *     signed by AGENTREF_ACCOUNT_PRIVATE_KEY, each awaited to FINALIZED).
  *   readOnChainReceipt(): get_receipt() → parsed Status / Score / Reason.
  *     Reading needs NO key — the address is public.
  *
  * Imported ONLY by Next.js route handlers (server side): the private signing
  * key lives in a server-only env var and never reaches the browser.
  *
- * Verified against the installed `genlayer-js@2.0.0-rc.1` types:
+ * Verified against the installed `genlayer-js@1.1.8` types:
  *   - createClient({ chain, account }) / createAccount(privateKey)
- *   - writeContract({ address, functionName, args, value })
- *   - waitForTransactionReceipt({ hash, waitUntil, interval, retries })
- *     (`status` is deprecated on this version in favour of waitUntil)
+ *   - writeContract({ address, functionName, args, value })  (value REQUIRED on 1.1.8)
+ *   - waitForTransactionReceipt({ hash, status, interval, retries })
  *   - readContract({ ..., transactionHashVariant: TransactionHashVariant.LATEST_FINAL })
  *   - success is judged from the transaction's statusName + txExecutionResultName
- *
- * Studio chains run the Studio consensus ABI (addTransaction(_params) plus
- * deploySalted / topUpFees). Only genlayer-js >= 2.0.0-rc.1 ships it, which is
- * why this package is pinned to the RC rather than 1.1.x.
+ *     (there is no isSuccessful() export on 1.1.8).
  *
  * @server-only — importing this module pulls genlayer-js + viem into the bundle,
  * so client components must go through the API routes in src/app/api/genlayer.
  */
 import { createAccount, createClient } from "genlayer-js";
-import { localnet, studionet, studioDevnet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
+import { localnet, studionet, testnetAsimov, testnetBradbury } from "genlayer-js/chains";
 import {
   ExecutionResult,
   TransactionHashVariant,
@@ -38,8 +33,8 @@ import {
   type Hash,
 } from "genlayer-js/types";
 
-import { SIGNER_KEY_ENV_VARS, getGenLayerAccount, getGenLayerConfig } from "./config";
-import { STUDIO_NEXT, explorerTxUrl, parseReceiptLine, statusIsDecided, type OnchainReceiptRecord } from "./contract";
+import { getGenLayerAccount, getGenLayerConfig } from "./config";
+import { explorerTxUrl, parseReceiptLine, statusIsDecided, type OnchainReceiptRecord } from "./contract";
 
 export type GenLayerOutcome =
   | { status: "not-configured"; reason: string }
@@ -48,23 +43,7 @@ export type GenLayerOutcome =
   | { status: "empty"; record: OnchainReceiptRecord; contractAddress: string; network: string; chainLabel: string; note: string }
   | { status: "error"; message: string };
 
-/**
- * Studio Next as a client-ready chain: the SDK's `studioDevnet` (same chain id)
- * repointed at the operator-specified RPC and given the Studio Dev explorer,
- * which the SDK leaves undefined because it doesn't index preview deployments.
- *
- * Exported so tests can assert the overrides without dialing out.
- */
-export const studioNext = {
-  ...studioDevnet,
-  name: STUDIO_NEXT.chainLabel,
-  rpcUrls: { default: { http: [STUDIO_NEXT.rpcUrl] } },
-  blockExplorers: {
-    default: { name: "GenLayer Studio Dev Explorer", url: STUDIO_NEXT.explorerBase },
-  },
-};
-
-const CHAINS = { localnet, studionet, studioDevnet: studioNext, testnetAsimov, testnetBradbury };
+const CHAINS = { localnet, studionet, testnetAsimov, testnetBradbury };
 type ChainKey = keyof typeof CHAINS;
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -79,7 +58,7 @@ function asAddress(addr: string): `0x${string}` {
 
 function asPrivateKey(key: string): `0x${string}` {
   if (!PRIVATE_KEY_RE.test(key)) {
-    throw new Error(`${SIGNER_KEY_ENV_VARS[0]} must be a 64-hex 0x private key.`);
+    throw new Error("AGENTREF_ACCOUNT_PRIVATE_KEY must be a 64-hex 0x private key.");
   }
   return key as `0x${string}`;
 }
@@ -151,10 +130,9 @@ async function writeAndWait(
   try {
     receipt = await client.waitForTransactionReceipt({
       hash: txHash as Hash,
-      // waitUntil replaces the deprecated `status` arg on genlayer-js 2.x.
-      waitUntil: "finalized",
+      status: TransactionStatus.FINALIZED,
       interval: 5_000,
-      retries: 120, // up to ~10 min: consensus on a public network runs real validators
+      retries: 120, // up to ~10 min: consensus on a public testnet runs real validators
     });
   } catch (e) {
     throw new Error(
@@ -200,7 +178,7 @@ export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerO
     return {
       status: "not-configured",
       reason:
-        `This deployment has no signer key (${SIGNER_KEY_ENV_VARS[0]}), so it cannot sign the on-chain writes. ` +
+        "This deployment has no signer key (AGENTREF_ACCOUNT_PRIVATE_KEY), so it cannot sign the on-chain writes. " +
         "Set it server-side only (see .env.example) to adjudicate — or use the read-only path, which needs no key.",
     };
   }

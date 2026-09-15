@@ -473,7 +473,7 @@ function RulingBlock({ r }: { r: Receipt }) {
         )}
       >
         {ruling.source === "genlayer"
-          ? "Judged by GenLayer validators on Studio Next — this verdict was read from the live on-chain record. No in-app AI was consulted."
+          ? "Judged by GenLayer validators on Testnet Bradbury — this verdict was read from the live on-chain record. No in-app AI was consulted."
           : `${sLabel.full}. This verdict came from AgentRef's transparent local model so the full flow can run without a network.`}
       </p>
 

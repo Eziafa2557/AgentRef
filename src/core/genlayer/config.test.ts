@@ -13,9 +13,9 @@ import assert from "node:assert/strict";
 import { adjudicationCapability, getGenLayerAccount, getGenLayerConfig, resolveChainKey } from "./config";
 import { LIVE_CONTRACT } from "./contract";
 // Importing runtime.ts is the real import check: it statically imports
-// genlayer-js (2.0.0-rc.1) + its chains + types. If those resolved names were
-// wrong, this file would fail to load before a single assertion ran.
-import { adjudicateOnChain, readOnChainReceipt, studioNext } from "./runtime";
+// genlayer-js@1.1.8 + its chains + types. If those resolved names were wrong,
+// this file would fail to load before a single assertion ran.
+import { adjudicateOnChain, readOnChainReceipt } from "./runtime";
 
 const GL_ENV_KEYS = [
   "NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS",
@@ -24,7 +24,6 @@ const GL_ENV_KEYS = [
   "AGENTREF_CONTRACT_ADDRESS",
   "AGENTREF_NETWORK",
   "AGENTREF_CHAIN_KEY",
-  "AGENTBEE_ACCOUNT_PRIVATE_KEY",
   "AGENTREF_ACCOUNT_PRIVATE_KEY",
   "AGENTREF_ACCOUNT_NAME",
 ];
@@ -47,7 +46,6 @@ function restoreGenLayerEnv(saved: Record<string, string | undefined>) {
 
 describe("resolveChainKey", () => {
   it("maps accepted network labels to camelCase genlayer-js/chains exports", () => {
-    assert.equal(resolveChainKey("studio_next"), "studioDevnet");
     assert.equal(resolveChainKey("testnet_bradbury"), "testnetBradbury");
     assert.equal(resolveChainKey("testnet_asimov"), "testnetAsimov");
     assert.equal(resolveChainKey("studionet"), "studionet");
@@ -55,7 +53,7 @@ describe("resolveChainKey", () => {
   });
 
   it("accepts an explicit chain-key override", () => {
-    assert.equal(resolveChainKey("studionet", "studioDevnet"), "studioDevnet");
+    assert.equal(resolveChainKey("studionet", "testnetBradbury"), "testnetBradbury");
   });
 
   it("passes unknown labels through rather than guessing", () => {
@@ -63,32 +61,17 @@ describe("resolveChainKey", () => {
   });
 });
 
-describe("Studio Next targeting", () => {
-  it("points the built-in contract metadata at Studio Next, not Bradbury", () => {
-    assert.equal(LIVE_CONTRACT.network, "studio_next");
-    assert.equal(LIVE_CONTRACT.chainKey, "studioDevnet");
-    assert.equal(resolveChainKey(LIVE_CONTRACT.network), "studioDevnet");
-  });
-});
-
 describe("getGenLayerConfig (no env)", () => {
-  it("is ready when an address is built in, and honestly not-configured when not", () => {
+  it("defaults to the LIVE deployed contract — reads work out of the box", () => {
     const saved = clearGenLayerEnv();
     try {
       const config = getGenLayerConfig();
-      if (LIVE_CONTRACT.address) {
-        assert.equal(config.kind, "ready");
-        if (config.kind !== "ready") return;
-        assert.equal(config.contractAddress, LIVE_CONTRACT.address);
-        assert.equal(config.network, LIVE_CONTRACT.network);
-        assert.equal(config.chainKey, LIVE_CONTRACT.chainKey);
-      } else {
-        // No deployed address yet — the app must refuse rather than guess one.
-        assert.equal(config.kind, "not-configured");
-        if (config.kind === "not-configured") {
-          assert.match(config.reason, /NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS/);
-        }
-      }
+      assert.equal(config.kind, "ready");
+      if (config.kind !== "ready") return;
+      assert.equal(config.contractAddress, LIVE_CONTRACT.address);
+      assert.equal(config.network, LIVE_CONTRACT.network);
+      assert.equal(config.chainKey, LIVE_CONTRACT.chainKey);
+      assert.match(config.chainLabel, /Bradbury/i);
     } finally {
       restoreGenLayerEnv(saved);
     }
@@ -98,13 +81,12 @@ describe("getGenLayerConfig (no env)", () => {
     const saved = clearGenLayerEnv();
     try {
       process.env.NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS = "0x1111111111111111111111111111111111111111";
-      process.env.NEXT_PUBLIC_AGENTREF_NETWORK = "studio_next";
+      process.env.NEXT_PUBLIC_AGENTREF_NETWORK = "studionet";
       const config = getGenLayerConfig();
       assert.equal(config.kind, "ready");
       if (config.kind !== "ready") return;
       assert.equal(config.contractAddress, "0x1111111111111111111111111111111111111111");
-      assert.equal(config.chainKey, "studioDevnet");
-      assert.match(config.chainLabel, /Studio Next/i);
+      assert.equal(config.chainKey, "studionet");
     } finally {
       restoreGenLayerEnv(saved);
     }
@@ -128,7 +110,7 @@ describe("adjudicationCapability", () => {
   it("reports the WRITE path unavailable without a signer key, and says why", () => {
     const cap = adjudicationCapability({ accountName: "agentref" });
     assert.equal(cap.canAdjudicate, false);
-    assert.match(cap.reason, /AGENTBEE_ACCOUNT_PRIVATE_KEY/);
+    assert.match(cap.reason, /AGENTREF_ACCOUNT_PRIVATE_KEY/);
   });
 
   it("rejects a malformed key rather than attempting to sign with it", () => {
@@ -146,17 +128,7 @@ describe("adjudicationCapability", () => {
     const saved = clearGenLayerEnv();
     try {
       assert.equal(adjudicationCapability().canAdjudicate, false);
-      process.env.AGENTBEE_ACCOUNT_PRIVATE_KEY = `0x${"b".repeat(64)}`;
-      assert.equal(adjudicationCapability().canAdjudicate, true);
-    } finally {
-      restoreGenLayerEnv(saved);
-    }
-  });
-
-  it("still honours the legacy AGENTREF_ACCOUNT_PRIVATE_KEY name", () => {
-    const saved = clearGenLayerEnv();
-    try {
-      process.env.AGENTREF_ACCOUNT_PRIVATE_KEY = `0x${"c".repeat(64)}`;
+      process.env.AGENTREF_ACCOUNT_PRIVATE_KEY = `0x${"b".repeat(64)}`;
       assert.equal(adjudicationCapability().canAdjudicate, true);
     } finally {
       restoreGenLayerEnv(saved);
@@ -168,9 +140,6 @@ describe("runtime (real genlayer-js import, no env)", () => {
   it("adjudicateOnChain returns not-configured (no signer key) instead of dialing out", async () => {
     const saved = clearGenLayerEnv();
     try {
-      // A configured address gets us past the config gate to the signer check.
-      process.env.NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS = "0x1111111111111111111111111111111111111111";
-      process.env.NEXT_PUBLIC_AGENTREF_NETWORK = "studio_next";
       const out = await adjudicateOnChain({
         brief: "Research the top 5 DeFi protocols by TVL and compare them using current data.",
         work: "The largest DeFi protocols are liquid-staking platforms and lending markets.",
@@ -179,7 +148,7 @@ describe("runtime (real genlayer-js import, no env)", () => {
         evidence: [{ label: "excerpt", content: "some evidence" }],
       });
       assert.equal(out.status, "not-configured");
-      if (out.status === "not-configured") assert.match(out.reason, /AGENTBEE_ACCOUNT_PRIVATE_KEY/);
+      if (out.status === "not-configured") assert.match(out.reason, /AGENTREF_ACCOUNT_PRIVATE_KEY/);
     } finally {
       restoreGenLayerEnv(saved);
     }
@@ -188,11 +157,5 @@ describe("runtime (real genlayer-js import, no env)", () => {
   it("exposes the read + write functions as the live single-receipt surface", () => {
     assert.equal(typeof readOnChainReceipt, "function");
     assert.equal(typeof adjudicateOnChain, "function");
-  });
-
-  it("derives a Studio Next client chain with our RPC and explorer", () => {
-    assert.equal(studioNext.id, 61997);
-    assert.deepEqual(studioNext.rpcUrls.default.http, ["https://studio-next.genlayer.com/api"]);
-    assert.equal(studioNext.blockExplorers.default.url, "https://explorer-studio-dev.genlayer.com");
   });
 });

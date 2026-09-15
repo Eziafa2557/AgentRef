@@ -16,47 +16,13 @@
  */
 import type { Ruling, Verdict } from "../types";
 
-/**
- * GenLayer "Studio Next" — the network AgentRef targets.
- *
- * Verified live (eth_chainId on the RPC returns 0xf22d = 61997). Studio chains
- * use the Studio consensus ABI (addTransaction(_params) + deploySalted /
- * topUpFees), which only genlayer-js >= 2.0.0-rc.1 ships — see runtime.ts.
- *
- * NOTE: studio-next.genlayer.com and studio-dev.genlayer.com both serve chain
- * 61997 (the SDK's bundled `studioDevnet` names the latter and deliberately
- * ships no block explorer). We use the operator-specified RPC and the Studio
- * Dev explorer, which does index this deployment.
- */
-export const STUDIO_NEXT = {
-  chainId: 61997,
-  network: "studio_next",
-  /** genlayer-js/chains export name this network derives from. */
-  chainKey: "studioDevnet",
-  chainLabel: "Studio Next",
-  rpcUrl: "https://studio-next.genlayer.com/api",
-  explorerBase: "https://explorer-studio-dev.genlayer.com",
-} as const;
-
-/**
- * Address of the deployed AgentRef single-receipt contract on Studio Next.
- *
- * Left empty until the deployment address is confirmed — an unset address makes
- * the app report `not-configured` rather than silently reading the wrong
- * contract. Override without a rebuild via NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS.
- */
-export const STUDIO_NEXT_CONTRACT_ADDRESS = "";
-
-/** Deploy transaction of the Studio Next contract, once known (explorer link). */
-export const STUDIO_NEXT_DEPLOY_TX = "";
-
 export const LIVE_CONTRACT = {
-  /** Deployed on GenLayer Studio Next (chain 61997). */
-  address: STUDIO_NEXT_CONTRACT_ADDRESS,
-  network: STUDIO_NEXT.network,
-  chainKey: STUDIO_NEXT.chainKey,
-  chainLabel: STUDIO_NEXT.chainLabel,
-  deployTxHash: STUDIO_NEXT_DEPLOY_TX,
+  /** Deployed on GenLayer Testnet — Bradbury (chain 4221). */
+  address: "0x648a2C783d3ED63fF47E1d5A4C90AF4714931c6f",
+  network: "testnet_bradbury",
+  chainKey: "testnetBradbury",
+  chainLabel: "Testnet — Bradbury",
+  deployTxHash: "0x64519fc90c8a0960943158e33c8efb6e04890dd7d4d4ac7e896d7880ba26a5e5",
   methods: [
     "create_receipt(brief, work, evidence, agent)",
     "challenge(reason, evidence)",
@@ -65,7 +31,7 @@ export const LIVE_CONTRACT = {
   ],
 } as const;
 
-export const EXPLORER_BASE = STUDIO_NEXT.explorerBase;
+export const EXPLORER_BASE = "https://explorer-bradbury.genlayer.com";
 
 export function explorerTxUrl(txHash: string): string {
   return `${EXPLORER_BASE}/tx/${txHash}`;

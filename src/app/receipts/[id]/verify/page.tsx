@@ -36,7 +36,7 @@ const SIM_STEPS = [
 ];
 
 const GL_STEPS = [
-  { title: "Adjudicate on GenLayer validators", detail: "create_receipt → challenge → adjudicate() on the live Studio Next contract. Validator consensus decides — not an in-app AI." },
+  { title: "Adjudicate on GenLayer validators", detail: "create_receipt → challenge → adjudicate() on the live Testnet — Bradbury contract. Validator consensus decides — not an in-app AI." },
   { title: "Read the on-chain verdict", detail: "Calls get_receipt() and parses Status / Score / Reason from the contract's public record." },
   { title: "Record the verdict", detail: "Saves the GenLayer verdict + explorer link on the receipt and settles the escrow." },
 ];
@@ -394,7 +394,7 @@ export default function VerifyPage() {
                   ? "GenLayer is not configured."
                   : writesAvailable
                     ? `Judge on the live Intelligent Contract (${glChainLabel}). Real validator consensus — not an in-app AI.`
-                    : "Wired to the live contract, but signing the writes needs a server key (AGENTBEE_ACCOUNT_PRIVATE_KEY) that this deployment does not have."}
+                    : "Wired to the live contract, but signing the writes needs a server key (AGENTREF_ACCOUNT_PRIVATE_KEY) that this deployment does not have."}
               </p>
             </button>
           </div>
@@ -436,7 +436,7 @@ export default function VerifyPage() {
               <p className="rounded-xl border border-cyan-400/15 bg-cyan-500/[0.04] px-3.5 py-2 text-[11px] leading-relaxed text-cyan-200/80">
                 Adjudicating sends <b>real transactions</b> to {glChainLabel} (contract{" "}
                 <span className="font-mono">{glContractAddr.slice(0, 10)}…</span>), signed server-side by
-                <span className="font-mono"> AGENTBEE_ACCOUNT_PRIVATE_KEY</span>. The button below it reads whatever the
+                <span className="font-mono"> AGENTREF_ACCOUNT_PRIVATE_KEY</span>. The button below it reads whatever the
                 shared contract already holds — free, no wallet.
               </p>
             )}
@@ -457,7 +457,7 @@ export default function VerifyPage() {
                 ? "Simulated fallback — local rules model"
                 : step >= 2
                   ? "Reading the verdict from GenLayer validators"
-                  : "Adjudicating on GenLayer validators — Studio Next"}
+                  : "Adjudicating on GenLayer validators — Testnet Bradbury"}
             </p>
           </div>
           <div className="mt-4 space-y-0">

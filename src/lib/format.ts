@@ -51,7 +51,7 @@ export function sourceLabel(source: "genlayer" | "simulated"): {
   return source === "genlayer"
     ? {
         short: "GENLAYER",
-        full: "GenLayer validators — Studio Next",
+        full: "GenLayer validators — Testnet Bradbury",
       }
     : {
         short: "SIMULATED",
