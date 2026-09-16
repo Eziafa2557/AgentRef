@@ -1,17 +1,20 @@
 import { NextResponse } from "next/server";
-import { adjudicateOnChain } from "@/core/genlayer/runtime";
+import { ADJUDICATION_STEPS, adjudicateOnChain, adjudicateStep, isAdjudicationStep } from "@/core/genlayer/runtime";
 import type { GenLayerOutcome } from "@/core/genlayer/runtime";
 
 /**
- * Adjudication runs THREE writes (create_receipt → challenge → adjudicate) and
- * waits for each to reach FINALIZED, and each of those runs real validator
- * consensus. That is far longer than a serverless function's default budget
- * (10s on Vercel Hobby), so the default would kill the request mid-flight —
- * after the writes were already submitted, which is the worst moment to lose
- * the response.
+ * One adjudication is THREE writes (create_receipt → challenge → adjudicate),
+ * each awaited to FINALIZED, and each of those runs real validator consensus —
+ * roughly 45s apiece.
  *
- * 300s is Vercel's ceiling on Pro; Hobby caps lower and will still clamp it.
- * The route degrades honestly either way: a write that is submitted but not yet
+ * So the browser drives the writes one per request via `step`, and only the
+ * whole-sequence form (no `step`, used by curl/scripts) needs a long budget.
+ * A single request held open for all three is ~140s of idle connection, which
+ * intermediaries cut or hold open indefinitely — the UI then spins forever and
+ * a verdict that really is on-chain never reaches the page.
+ *
+ * 300s is Vercel's ceiling on Pro; Hobby caps lower and will still clamp it. The
+ * route degrades honestly either way: a write that is submitted but not yet
  * finalized reports its transaction hash rather than claiming a verdict.
  */
 export const maxDuration = 300;
@@ -35,12 +38,29 @@ export async function POST(req: Request) {
     );
   }
 
-  const out = await adjudicateOnChain({
+  const args = {
     brief,
     work,
     reason,
     agent: typeof body.agent === "string" ? body.agent.trim() : "",
     evidence: Array.isArray(body.evidence) ? (body.evidence as Array<{ label?: string; content?: string }>) : typeof body.evidence === "string" ? body.evidence : undefined,
-  });
-  return NextResponse.json(out);
+  };
+
+  // An unknown step is a caller bug — reject it rather than silently running
+  // the whole sequence, which would reintroduce the long request by accident.
+  const step = typeof body.step === "string" ? body.step.trim() : "";
+  if (step) {
+    if (!isAdjudicationStep(step)) {
+      return NextResponse.json(
+        {
+          status: "error",
+          message: `Unknown step "${step}". Expected one of: ${ADJUDICATION_STEPS.join(", ")} — or omit step to run all three.`,
+        } satisfies GenLayerOutcome,
+        { status: 400 }
+      );
+    }
+    return NextResponse.json(await adjudicateStep(step, args));
+  }
+
+  return NextResponse.json(await adjudicateOnChain(args));
 }

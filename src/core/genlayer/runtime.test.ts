@@ -21,7 +21,8 @@ import assert from "node:assert/strict";
 
 import type { GenLayerTransaction } from "genlayer-js/types";
 
-import { waitForFinalized, writeSucceeded } from "./runtime";
+import { ADJUDICATION_STEPS, isAdjudicationStep, stepCallFor, waitForFinalized, writeSucceeded } from "./runtime";
+import type { NormalizedArgs } from "./runtime";
 
 /** `status` is the enum INDEX on the wire: FINALIZED=7, ACCEPTED=5. */
 const asReceipt = (fields: Record<string, unknown>): GenLayerTransaction =>
@@ -144,4 +145,51 @@ describe("waitForFinalized — tolerating a flaky poll", () => {
       }
     );
   });
+});
+
+/**
+ * The browser drives the three writes as three separate requests, so each step
+ * must map to exactly the right contract method with the right arity. A wrong
+ * argument count reverts on-chain, which is a slow and costly way to find a
+ * typo — hence these.
+ */
+describe("adjudication steps", () => {
+  const ARGS: NormalizedArgs = {
+    brief: "B",
+    work: "W",
+    reason: "R",
+    agent: "A",
+    evidence: "E",
+  };
+
+  it("runs the writes in the order the contract requires", () => {
+    assert.deepEqual([...ADJUDICATION_STEPS], ["create", "challenge", "adjudicate"]);
+  });
+
+  it("maps each step to its contract method and argument count", () => {
+    const create = stepCallFor("create", ARGS);
+    assert.equal(create[0], "create_receipt");
+    assert.deepEqual(create[1], ["B", "W", "E", "A"]); // brief, work, evidence, agent
+    assert.equal(create[1].length, 4);
+
+    const challenge = stepCallFor("challenge", ARGS);
+    assert.equal(challenge[0], "challenge");
+    assert.deepEqual(challenge[1], ["R", "E"]); // reason, evidence
+    assert.equal(challenge[1].length, 2);
+
+    const adjudicate = stepCallFor("adjudicate", ARGS);
+    assert.equal(adjudicate[0], "adjudicate");
+    assert.deepEqual(adjudicate[1], []);
+    assert.equal(adjudicate[1].length, 0);
+  });
+
+  it("guards the step name so a typo cannot silently run the wrong call", () => {
+    assert.equal(isAdjudicationStep("create"), true);
+    assert.equal(isAdjudicationStep("adjudicate"), true);
+    assert.equal(isAdjudicationStep("create_receipt"), false);
+    assert.equal(isAdjudicationStep(""), false);
+    assert.equal(isAdjudicationStep("CREATE"), false);
+  });
+  // The unsigned-env behaviour of adjudicateStep is covered in config.test.ts,
+  // beside its adjudicateOnChain sibling — that file owns the env plumbing.
 });

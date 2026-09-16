@@ -35,11 +35,19 @@ const SIM_STEPS = [
   { title: "Record the ruling", detail: "Persists the verdict on the receipt and advances the escrow state machine." },
 ];
 
+/* One entry per real operation the on-chain path performs. The three writes are
+   driven as three separate requests (see adjudicateOnGenLayer), so each gets its
+   own spinner instead of one spinner covering ~140s of work. */
 const GL_STEPS = [
-  { title: "Adjudicate on GenLayer validators", detail: `create_receipt → challenge → adjudicate() on the live ${LIVE_CONTRACT.chainLabel} contract. Validator consensus decides — not an in-app AI.` },
+  { title: "Create the work receipt on-chain", detail: "create_receipt(brief, work, evidence, agent), signed server-side and awaited to FINALIZED." },
+  { title: "Raise the challenge on-chain", detail: "challenge(reason, evidence) — the dispute is recorded against the receipt." },
+  { title: "Adjudicate on GenLayer validators", detail: `adjudicate() on the live ${LIVE_CONTRACT.chainLabel} contract. Validator consensus decides — not an in-app AI.` },
   { title: "Read the on-chain verdict", detail: "Calls get_receipt() and parses Status / Score / Reason from the contract's public record." },
   { title: "Record the verdict", detail: "Saves the GenLayer verdict + explorer link on the receipt and settles the escrow." },
 ];
+
+/** Index of the read step within GL_STEPS — the running header keys off it. */
+const GL_READ_STEP = 3;
 
 export default function VerifyPage() {
   const params = useParams<{ id: string }>();
@@ -114,7 +122,18 @@ export default function VerifyPage() {
   }
 
   /* ------------------------------------------------------------- */
-  /* REAL GenLayer: adjudicate (server-signed writes) then read.    */
+  /* REAL GenLayer: three short requests, then read the chain.      */
+  /*
+   * The three writes are issued ONE PER REQUEST rather than as a single call.
+   * Held as one request the sequence is ~140s of idle connection (each write
+   * waits for FINALIZED), which intermediaries cut or hold open indefinitely —
+   * the page then spins forever and a verdict that really is on-chain never
+   * arrives. Each request here is ~45s.
+   *
+   * The write responses are treated as progress reports, NOT as truth. If a
+   * request's connection dies, the writes may still have landed, so we fall
+   * through to reading the contract: only the chain decides what happened.
+   */
   async function adjudicateOnGenLayer() {
     const cur = getReceipt(id);
     if (!cur?.challenge || cur.ruling) return;
@@ -127,57 +146,73 @@ export default function VerifyPage() {
     if (latest.settlement !== "UNDER_REVIEW") latest = submitForReview(id);
     const challenge = latest.challenge!;
     const evidence = challenge.evidence.map((e) => ({ label: e.label, content: e.content }));
+    const payload = {
+      brief: latest.brief,
+      work: latest.work,
+      agent: latest.agentName,
+      reason: challenge.reason,
+      evidence,
+    };
 
-    // 1) adjudicate — server signs create_receipt → challenge → adjudicate
-    setStep(1);
-    let out: { status?: string; message?: string; reason?: string; transactionHash?: string; contractAddress?: string };
-    try {
-      const res = await fetch("/api/genlayer/adjudicate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          brief: latest.brief,
-          work: latest.work,
-          agent: latest.agentName,
-          reason: challenge.reason,
-          evidence,
-        }),
-      });
-      out = (await res.json()) as typeof out;
-    } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Submitting the dispute to GenLayer failed.");
-      setPhase("error");
-      return;
+    type StepOut = { status?: string; message?: string; reason?: string; transactionHash?: string; contractAddress?: string };
+    let contractAddress: string | undefined;
+    let txHash: string | undefined;
+    let stepFailure: string | null = null;
+
+    const STEPS = ["create", "challenge", "adjudicate"] as const;
+    for (let i = 0; i < STEPS.length && !stepFailure; i++) {
+      setStep(i);
+      try {
+        const res = await fetch("/api/genlayer/adjudicate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...payload, step: STEPS[i] }),
+        });
+        const out = (await res.json()) as StepOut;
+        if (out.status === "error" || out.status === "not-configured") {
+          // A rejection from the server IS authoritative for this step.
+          stepFailure = out.message ?? out.reason ?? `The ${STEPS[i]} step failed.`;
+          break;
+        }
+        contractAddress = out.contractAddress ?? contractAddress;
+        // Only adjudicate() produces the verdict, so its tx is the provenance.
+        if (STEPS[i] === "adjudicate") txHash = out.transactionHash;
+      } catch {
+        // Transport failure — says nothing about whether the write landed.
+        // Record it and let the read below decide.
+        stepFailure = `The ${STEPS[i]} step did not report back (the connection dropped).`;
+        break;
+      }
     }
-    if (out.status === "error" || out.status === "not-configured") {
-      setErrorMsg(out.message ?? out.reason ?? "Adjudication on GenLayer failed.");
-      setPhase("error");
-      return;
-    }
-    const txHash = out.transactionHash!;
 
     // 2) read get_receipt until the verdict is on the record
-    setStep(2);
+    setStep(GL_READ_STEP);
     let record: OnchainReceiptRecord | null = null;
+    let readError: string | null = null;
     try {
       for (let attempt = 0; attempt < 8; attempt++) {
         const r = await fetch("/api/genlayer/receipt");
-        const ro = (await r.json()) as { status: string; message?: string; record?: OnchainReceiptRecord };
+        const ro = (await r.json()) as { status: string; message?: string; record?: OnchainReceiptRecord; contractAddress?: string };
         if (ro.status === "receipt" && ro.record) {
           record = ro.record;
+          contractAddress = ro.contractAddress ?? contractAddress;
           break;
         }
         if (ro.status === "error") throw new Error(ro.message ?? "Reading the verdict failed.");
         await sleep(attempt === 0 ? 1500 : 3000);
       }
     } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Reading the GenLayer verdict failed.");
-      setPhase("error");
-      return;
+      readError = e instanceof Error ? e.message : "Reading the GenLayer verdict failed.";
     }
+
     if (!record) {
+      // No verdict on-chain. NOW the step failure is the thing to report — but
+      // only if there was one; otherwise the writes landed and simply are not
+      // readable as a verdict yet.
       setErrorMsg(
-        "The dispute was adjudicated on-chain, but the verdict has not reached a readable FINAL state yet. Follow the transaction on the explorer and come back — the verdict may still finalize."
+        readError ??
+          stepFailure ??
+          "The dispute was adjudicated on-chain, but the verdict has not reached a readable FINAL state yet. Follow the transaction on the explorer and come back — the verdict may still finalize."
       );
       setPhase("error");
       return;
@@ -186,14 +221,14 @@ export default function VerifyPage() {
     const ruling = onchainRuling(record, {
       receivedAt: new Date().toISOString(),
       transactionHash: txHash,
-      contractAddress: out.contractAddress ?? (glConfig.kind === "ready" ? glConfig.contractAddress : undefined),
+      contractAddress: contractAddress ?? (glConfig.kind === "ready" ? glConfig.contractAddress : undefined),
     });
     if (!ruling) {
       setErrorMsg(`The contract returned an unmapped status (“${record.status}”). No verdict was recorded.`);
       setPhase("error");
       return;
     }
-    setStep(3);
+    setStep(GL_READ_STEP + 1);
     recordRuling(id, ruling);
     setPhase("done");
   }
@@ -207,7 +242,7 @@ export default function VerifyPage() {
     setErrorMsg(null);
     pickMode("genlayer");
     setPhase("running");
-    setStep(1);
+    setStep(GL_READ_STEP);
     let ro: { status: string; message?: string; note?: string; record?: OnchainReceiptRecord; contractAddress?: string };
     try {
       const r = await fetch("/api/genlayer/receipt");
@@ -241,7 +276,7 @@ export default function VerifyPage() {
       setPhase("error");
       return;
     }
-    setStep(3);
+    setStep(GL_READ_STEP + 1);
     recordRuling(id, ruling);
     setPhase("done");
   }
@@ -455,7 +490,7 @@ export default function VerifyPage() {
             <p className="text-sm font-bold text-white">
               {mode === "simulated"
                 ? "Simulated fallback — local rules model"
-                : step >= 2
+                : step >= GL_READ_STEP
                   ? "Reading the verdict from GenLayer validators"
                   : `Adjudicating on GenLayer validators — ${LIVE_CONTRACT.chainLabel}`}
             </p>

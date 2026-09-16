@@ -15,7 +15,7 @@ import { LIVE_CONTRACT } from "./contract";
 // Importing runtime.ts is the real import check: it statically imports
 // genlayer-js@1.1.8 + its chains + types. If those resolved names were wrong,
 // this file would fail to load before a single assertion ran.
-import { adjudicateOnChain, readOnChainReceipt } from "./runtime";
+import { ADJUDICATION_STEPS, adjudicateOnChain, adjudicateStep, readOnChainReceipt } from "./runtime";
 
 const GL_ENV_KEYS = [
   "NEXT_PUBLIC_AGENTREF_CONTRACT_ADDRESS",
@@ -182,5 +182,40 @@ describe("runtime (real genlayer-js import, no env)", () => {
   it("exposes the read + write functions as the live single-receipt surface", () => {
     assert.equal(typeof readOnChainReceipt, "function");
     assert.equal(typeof adjudicateOnChain, "function");
+    assert.equal(typeof adjudicateStep, "function");
+  });
+
+  /**
+   * The browser drives the writes one per request, so EVERY step must refuse to
+   * dial out when there is no key — not just the first. A step that quietly
+   * reached the network unsigned would surface as an opaque failure mid-sequence.
+   */
+  it("every adjudicateStep returns not-configured (no signer key) instead of dialing out", async () => {
+    const saved = clearGenLayerEnv();
+    try {
+      for (const step of ADJUDICATION_STEPS) {
+        const out = await adjudicateStep(step, {
+          brief: "Research the top 5 DeFi protocols by TVL and compare them using current data.",
+          work: "The largest DeFi protocols are liquid-staking platforms and lending markets.",
+          reason: "TVL figures outdated.",
+          agent: "Orbit Research AI",
+          evidence: [{ label: "excerpt", content: "some evidence" }],
+        });
+        assert.equal(out.status, "not-configured", `${step} should not dial out without a key`);
+        if (out.status === "not-configured") assert.match(out.reason, /AGENTBEE_ACCOUNT_PRIVATE_KEY/);
+      }
+    } finally {
+      restoreGenLayerEnv(saved);
+    }
+  });
+
+  it("adjudicateStep rejects an incomplete call before it reaches the key check", async () => {
+    const saved = clearGenLayerEnv();
+    try {
+      const out = await adjudicateStep("create", { brief: "", work: "W", reason: "R" });
+      assert.equal(out.status, "error");
+    } finally {
+      restoreGenLayerEnv(saved);
+    }
   });
 });

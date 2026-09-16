@@ -52,6 +52,7 @@ import {
 export type GenLayerOutcome =
   | { status: "not-configured"; reason: string }
   | { status: "adjudicated"; transactionHash: string; contractAddress: string; network: string; chainLabel: string; explorerUrl: string; note: string }
+  | { status: "step-done"; step: AdjudicationStep; transactionHash: string; contractAddress: string; network: string; chainLabel: string; explorerUrl: string; note: string }
   | { status: "receipt"; record: OnchainReceiptRecord; contractAddress: string; network: string; chainLabel: string }
   | { status: "empty"; record: OnchainReceiptRecord; contractAddress: string; network: string; chainLabel: string; note: string }
   | { status: "error"; message: string };
@@ -304,63 +305,173 @@ export interface AdjudicateArgs {
   evidence?: Array<{ label?: string; content?: string }> | string;
 }
 
+/** The three writes the contract requires, in the order it requires them. */
+export type AdjudicationStep = "create" | "challenge" | "adjudicate";
+
+export const ADJUDICATION_STEPS: readonly AdjudicationStep[] = ["create", "challenge", "adjudicate"] as const;
+
+export function isAdjudicationStep(v: string): v is AdjudicationStep {
+  return (ADJUDICATION_STEPS as readonly string[]).includes(v);
+}
+
+/** Call arguments, already normalized to the strings the contract takes. */
+export interface NormalizedArgs {
+  brief: string;
+  work: string;
+  reason: string;
+  agent: string;
+  evidence: string;
+}
+
 /**
- * Run the full on-chain judgement for the single-receipt contract:
- * create_receipt(brief, work, evidence, agent) → challenge(reason, evidence) →
- * adjudicate(), each write awaited to FINALIZED. Needs a funded signer key.
+ * Which contract method a step calls, and with what.
+ *
+ * Pure and exported so the arity can be unit-tested: a wrong argument count is
+ * a silent revert on-chain, which is an expensive way to find a typo.
  */
-export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerOutcome> {
+export function stepCallFor(step: AdjudicationStep, a: NormalizedArgs): [string, string[]] {
+  switch (step) {
+    case "create":
+      return ["create_receipt", [a.brief, a.work, a.evidence, a.agent]];
+    case "challenge":
+      return ["challenge", [a.reason, a.evidence]];
+    case "adjudicate":
+      return ["adjudicate", []];
+  }
+}
+
+interface Prepared {
+  client: ReturnType<typeof createClient>;
+  contractAddress: `0x${string}`;
+  network: string;
+  chainLabel: string;
+  args: NormalizedArgs;
+}
+
+/**
+ * Everything both entry points must do before signing: validate, resolve
+ * config, find the key, pick the chain, and confirm the contract really is
+ * AgentRef. Shared so the one-shot and step-wise paths cannot drift apart.
+ */
+async function prepareAdjudication(
+  args: AdjudicateArgs
+): Promise<{ ok: true; prepared: Prepared } | { ok: false; outcome: GenLayerOutcome }> {
   const { brief, work, reason } = args;
   if (!brief?.trim() || !work?.trim() || !reason?.trim()) {
-    return { status: "error", message: "brief, work and reason are all required to adjudicate." };
+    return { ok: false, outcome: { status: "error", message: "brief, work and reason are all required to adjudicate." } };
   }
-  const ev = evidenceText(args.evidence);
-  const agent = (args.agent ?? "").trim();
 
   const ready = readyConfigOr("GenLayer is not configured.");
-  if (!ready.ok) return { status: "not-configured", reason: ready.reason };
+  if (!ready.ok) return { ok: false, outcome: { status: "not-configured", reason: ready.reason } };
 
   const account = getGenLayerAccount();
   if (!account.privateKey) {
     return {
-      status: "not-configured",
-      reason:
-        `This deployment has no signer key (${SIGNER_KEY_ENV_VARS[0]}), so it cannot sign the on-chain writes. ` +
-        "Set it server-side only (see .env.example) to adjudicate — or use the read-only path, which needs no key.",
+      ok: false,
+      outcome: {
+        status: "not-configured",
+        reason:
+          `This deployment has no signer key (${SIGNER_KEY_ENV_VARS[0]}), so it cannot sign the on-chain writes. ` +
+          "Set it server-side only (see .env.example) to adjudicate — or use the read-only path, which needs no key.",
+      },
     };
   }
 
   const chainPick = pickChain(ready.config.chainKey);
-  if (!chainPick.ok) return { status: "error", message: chainPick.reason };
+  if (!chainPick.ok) return { ok: false, outcome: { status: "error", message: chainPick.reason } };
 
   try {
     const contractAddress = asAddress(ready.config.contractAddress);
     const signer = createAccount(asPrivateKey(account.privateKey));
     const client = createClient({ chain: chainPick.chain, account: signer });
 
-    // Confirm the surface BEFORE signing anything: three writes that cannot
-    // succeed would burn fees and time only to fail at the first call.
+    // Confirm the surface BEFORE signing anything: a write that cannot succeed
+    // would burn fees and time only to fail at the call.
     const surfaceProblem = await agentRefSurfaceProblem(client, contractAddress);
-    if (surfaceProblem) return { status: "error", message: surfaceProblem };
+    if (surfaceProblem) return { ok: false, outcome: { status: "error", message: surfaceProblem } };
 
-    // One adjudication = three writes; adjudicate() is the one that makes
-    // validators rule, so its transaction is the provenance we show.
-    const calls: Array<[string, string[]]> = [
-      ["create_receipt", [brief, work, ev, agent]],
-      ["challenge", [reason, ev]],
-      ["adjudicate", []],
-    ];
+    return {
+      ok: true,
+      prepared: {
+        client,
+        contractAddress,
+        network: ready.config.network,
+        chainLabel: ready.config.chainLabel,
+        args: {
+          brief: brief.trim(),
+          work: work.trim(),
+          reason: reason.trim(),
+          agent: (args.agent ?? "").trim(),
+          evidence: evidenceText(args.evidence),
+        },
+      },
+    };
+  } catch (e) {
+    return { ok: false, outcome: { status: "error", message: e instanceof Error ? e.message : String(e) } };
+  }
+}
+
+/**
+ * Run ONE of the three writes and wait for it to finalize.
+ *
+ * Exists so the browser can drive the sequence as three short requests. Held
+ * open as a single request, the full sequence is ~140s of idle connection —
+ * each write waits for FINALIZED — which intermediaries cut or hold open
+ * indefinitely, leaving the UI spinning forever while the verdict, really
+ * on-chain, never reaches the page.
+ */
+export async function adjudicateStep(step: AdjudicationStep, args: AdjudicateArgs): Promise<GenLayerOutcome> {
+  const prep = await prepareAdjudication(args);
+  if (!prep.ok) return prep.outcome;
+  const { client, contractAddress, network, chainLabel, args: normalized } = prep.prepared;
+
+  try {
+    const [functionName, callArgs] = stepCallFor(step, normalized);
+    const transactionHash = await writeAndWait(client, contractAddress, functionName, callArgs);
+    return {
+      status: "step-done",
+      step,
+      transactionHash,
+      contractAddress,
+      network,
+      chainLabel,
+      explorerUrl: explorerTxUrl(transactionHash),
+      note: `${functionName} finalized on-chain.`,
+    };
+  } catch (e) {
+    return { status: "error", message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Run the full on-chain judgement for the single-receipt contract:
+ * create_receipt(brief, work, evidence, agent) → challenge(reason, evidence) →
+ * adjudicate(), each write awaited to FINALIZED. Needs a funded signer key.
+ *
+ * Kept for callers that want the whole sequence in one request (curl, scripts).
+ * The browser drives `adjudicateStep` three times instead — see its note on why
+ * one long request is the wrong shape.
+ */
+export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerOutcome> {
+  const prep = await prepareAdjudication(args);
+  if (!prep.ok) return prep.outcome;
+  const { client, contractAddress, network, chainLabel, args: normalized } = prep.prepared;
+
+  try {
+    // adjudicate() is the write that makes validators rule, so its transaction
+    // is the provenance we report.
     let adjudicateTx = "";
-    for (const [fn, callArgs] of calls) {
-      adjudicateTx = await writeAndWait(client, contractAddress, fn, callArgs);
+    for (const step of ADJUDICATION_STEPS) {
+      const [functionName, callArgs] = stepCallFor(step, normalized);
+      adjudicateTx = await writeAndWait(client, contractAddress, functionName, callArgs);
     }
 
     return {
       status: "adjudicated",
       transactionHash: adjudicateTx,
       contractAddress,
-      network: ready.config.network,
-      chainLabel: ready.config.chainLabel,
+      network,
+      chainLabel,
       explorerUrl: explorerTxUrl(adjudicateTx),
       note: "Receipt created, challenged and adjudicated by GenLayer validator consensus.",
     };
