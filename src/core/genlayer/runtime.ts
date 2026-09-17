@@ -51,8 +51,8 @@ import {
 
 export type GenLayerOutcome =
   | { status: "not-configured"; reason: string }
-  | { status: "adjudicated"; transactionHash: string; contractAddress: string; network: string; chainLabel: string; explorerUrl: string; note: string }
-  | { status: "step-done"; step: AdjudicationStep; transactionHash: string; contractAddress: string; network: string; chainLabel: string; explorerUrl: string; note: string }
+  | { status: "adjudicated"; transactionHash: string; contractAddress: string; network: string; chainLabel: string; explorerUrl: string; timings: Record<string, WriteTimings>; note: string }
+  | { status: "step-done"; step: AdjudicationStep; transactionHash: string; contractAddress: string; network: string; chainLabel: string; explorerUrl: string; waitUntil: WaitUntil; timings: WriteTimings; note: string }
   | { status: "receipt"; record: OnchainReceiptRecord; contractAddress: string; network: string; chainLabel: string }
   | { status: "empty"; record: OnchainReceiptRecord; contractAddress: string; network: string; chainLabel: string; note: string }
   | { status: "error"; message: string };
@@ -144,10 +144,30 @@ export function evidenceText(items: Array<{ label?: string; content?: string }> 
 const FINALIZATION_BUDGET_MS = 90_000;
 const POLL_INTERVAL_MS = 5_000;
 
+/**
+ * How far to wait for a write.
+ *
+ * `decided` returns as soon as the validators have ruled (ACCEPTED);
+ * `finalized` waits for the protocol to finalize that decision afterwards.
+ *
+ * MEASURED on Studio Dev (2026-09-16), from the on-chain record of real writes:
+ * `create_receipt` reached its last vote 2s after creation, and `adjudicate`
+ * (the one that runs LLM consensus) 18s after — yet each HTTP write took ~39-50s.
+ * The gap is the post-decision finalization wait, which is the single biggest
+ * cost in the whole adjudication. `decided` is what lets us stop paying it.
+ */
+export type WaitUntil = "decided" | "finalized";
+
+export const WAIT_UNTIL_VALUES: readonly WaitUntil[] = ["decided", "finalized"] as const;
+
+export function isWaitUntil(v: string): v is WaitUntil {
+  return (WAIT_UNTIL_VALUES as readonly string[]).includes(v);
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * Wait for a submitted write to reach FINALIZED, tolerating a flaky poll.
+ * Wait for a submitted write to reach its target state, tolerating a flaky poll.
  *
  * `waitForTransactionReceipt` abandons the wait on the FIRST RPC error, and the
  * Studio RPC intermittently answers a poll with an HTML error page instead of
@@ -168,17 +188,18 @@ export async function waitForFinalized(
   client: ReturnType<typeof createClient>,
   txHash: string,
   functionName: string,
-  opts: { intervalMs?: number; budgetMs?: number } = {}
+  opts: { intervalMs?: number; budgetMs?: number; waitUntil?: WaitUntil } = {}
 ): Promise<GenLayerTransaction> {
   const intervalMs = opts.intervalMs ?? POLL_INTERVAL_MS;
   const budgetMs = opts.budgetMs ?? FINALIZATION_BUDGET_MS;
+  const waitUntil = opts.waitUntil ?? "finalized";
   const deadline = Date.now() + budgetMs;
   let lastMessage = "";
   for (;;) {
     try {
       return await client.waitForTransactionReceipt({
         hash: txHash as Hash,
-        waitUntil: "finalized", // `status` is deprecated in genlayer-js >= 2.0.0-rc.1
+        waitUntil, // `status` is deprecated in genlayer-js >= 2.0.0-rc.1
         interval: intervalMs,
         retries: 1,
       });
@@ -187,7 +208,7 @@ export async function waitForFinalized(
     }
     if (Date.now() >= deadline) {
       throw new Error(
-        `${functionName} was submitted (${txHash}) but finalization could not be confirmed within ` +
+        `${functionName} was submitted (${txHash}) but ${waitUntil === "decided" ? "a decision" : "finalization"} could not be confirmed within ` +
           `${Math.round(budgetMs / 1000)}s (last poll error: ${lastMessage}). ` +
           "That is a failure to CONFIRM, not proof the write failed — a submitted write can still finalize. " +
           "Check the transaction on the explorer, and re-read the receipt to see the contract's real state."
@@ -197,12 +218,30 @@ export async function waitForFinalized(
   }
 }
 
+/**
+ * Where a single write's wall-clock actually went, in milliseconds from the
+ * start of the call. Recorded because the dominant cost of adjudication is not
+ * the validators — it is the wait AFTER they have ruled. Without these numbers
+ * that claim is a guess.
+ */
+export interface WriteTimings {
+  /** Fee quote + signing + submission. */
+  submitMs: number;
+  /** To the validators reaching a decision (ACCEPTED). */
+  decidedMs: number;
+  /** To the protocol finalizing that decision. Equals decidedMs when we stop at `decided`. */
+  finalizedMs: number;
+}
+
 async function writeAndWait(
   client: ReturnType<typeof createClient>,
   contractAddress: `0x${string}`,
   functionName: string,
-  args: string[]
-): Promise<string> {
+  args: string[],
+  waitUntil: WaitUntil = "finalized"
+): Promise<{ txHash: string; timings: WriteTimings }> {
+  const startedAt = Date.now();
+
   // Quote the protocol fee for this exact call before signing it.
   //
   // A write with no fee is REJECTED by the chain — the node answers
@@ -239,16 +278,34 @@ async function writeAndWait(
   if (typeof txHash !== "string" || !txHash.startsWith("0x")) {
     throw new Error(`${functionName} did not return a transaction id.`);
   }
+  const submitMs = Date.now() - startedAt;
 
-  const receipt = await waitForFinalized(client, txHash, functionName);
+  // Always stop at the decision first, even when we intend to go on to
+  // finalization. It costs nothing extra — the second wait simply continues
+  // from where this one left off — and it is the only way to learn how much of
+  // the wait was the protocol's rather than the validators'.
+  const decided = await waitForFinalized(client, txHash, functionName, { waitUntil: "decided" });
 
+  if (!writeSucceeded(decided)) {
+    throw new Error(
+      `${functionName} did not succeed. status=${decided.status ?? "?"} (${decided.statusName ?? "no statusName"}), ` +
+        `txExecutionResult=${decided.txExecutionResult ?? "?"} (${decided.txExecutionResultName ?? "no txExecutionResultName"}) (tx ${txHash}).`
+    );
+  }
+  const decidedMs = Date.now() - startedAt;
+
+  if (waitUntil === "decided") {
+    return { txHash, timings: { submitMs, decidedMs, finalizedMs: decidedMs } };
+  }
+
+  const receipt = await waitForFinalized(client, txHash, functionName, { waitUntil: "finalized" });
   if (!writeSucceeded(receipt)) {
     throw new Error(
       `${functionName} did not succeed. status=${receipt.status ?? "?"} (${receipt.statusName ?? "no statusName"}), ` +
         `txExecutionResult=${receipt.txExecutionResult ?? "?"} (${receipt.txExecutionResultName ?? "no txExecutionResultName"}) (tx ${txHash}).`
     );
   }
-  return txHash as string;
+  return { txHash, timings: { submitMs, decidedMs, finalizedMs: Date.now() - startedAt } };
 }
 
 /**
@@ -303,6 +360,12 @@ export interface AdjudicateArgs {
   reason: string;
   agent?: string;
   evidence?: Array<{ label?: string; content?: string }> | string;
+  /**
+   * How far to wait for each write. Defaults to `finalized`, which is what the
+   * app has always done. `decided` is measurably much faster and is opt-in per
+   * caller until it is proven safe for the step sequence — see WaitUntil.
+   */
+  waitUntil?: WaitUntil;
 }
 
 /** The three writes the contract requires, in the order it requires them. */
@@ -427,16 +490,24 @@ export async function adjudicateStep(step: AdjudicationStep, args: AdjudicateArg
 
   try {
     const [functionName, callArgs] = stepCallFor(step, normalized);
-    const transactionHash = await writeAndWait(client, contractAddress, functionName, callArgs);
+    const { txHash, timings } = await writeAndWait(
+      client,
+      contractAddress,
+      functionName,
+      callArgs,
+      args.waitUntil
+    );
     return {
       status: "step-done",
       step,
-      transactionHash,
+      transactionHash: txHash,
       contractAddress,
       network,
       chainLabel,
-      explorerUrl: explorerTxUrl(transactionHash),
-      note: `${functionName} finalized on-chain.`,
+      explorerUrl: explorerTxUrl(txHash),
+      waitUntil: args.waitUntil ?? "finalized",
+      timings,
+      note: `${functionName} ${args.waitUntil === "decided" ? "decided" : "finalized"} on-chain.`,
     };
   } catch (e) {
     return { status: "error", message: e instanceof Error ? e.message : String(e) };
@@ -461,9 +532,12 @@ export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerO
     // adjudicate() is the write that makes validators rule, so its transaction
     // is the provenance we report.
     let adjudicateTx = "";
+    const timings: Record<string, WriteTimings> = {};
     for (const step of ADJUDICATION_STEPS) {
       const [functionName, callArgs] = stepCallFor(step, normalized);
-      adjudicateTx = await writeAndWait(client, contractAddress, functionName, callArgs);
+      const written = await writeAndWait(client, contractAddress, functionName, callArgs, args.waitUntil);
+      adjudicateTx = written.txHash;
+      timings[step] = written.timings;
     }
 
     return {
@@ -473,6 +547,7 @@ export async function adjudicateOnChain(args: AdjudicateArgs): Promise<GenLayerO
       network,
       chainLabel,
       explorerUrl: explorerTxUrl(adjudicateTx),
+      timings,
       note: "Receipt created, challenged and adjudicated by GenLayer validator consensus.",
     };
   } catch (e) {

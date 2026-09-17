@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 
 import type { GenLayerTransaction } from "genlayer-js/types";
 
-import { ADJUDICATION_STEPS, isAdjudicationStep, stepCallFor, waitForFinalized, writeSucceeded } from "./runtime";
+import { ADJUDICATION_STEPS, WAIT_UNTIL_VALUES, isAdjudicationStep, isWaitUntil, stepCallFor, waitForFinalized, writeSucceeded } from "./runtime";
 import type { NormalizedArgs } from "./runtime";
 
 /** `status` is the enum INDEX on the wire: FINALIZED=7, ACCEPTED=5. */
@@ -141,6 +141,56 @@ describe("waitForFinalized — tolerating a flaky poll", () => {
         // It must not claim the write failed — it only failed to confirm it.
         assert.match(e.message, /failure to CONFIRM, not proof the write failed/);
         assert.match(e.message, /0xdeadbeef/);
+        return true;
+      }
+    );
+  });
+});
+
+/**
+ * Where a write's wall-clock goes. Measured on Studio Dev from the on-chain
+ * record of real transactions: `create_receipt` reached its last vote 2s after
+ * creation and `adjudicate` 18s after, while each HTTP write took ~39-50s. The
+ * gap is the protocol's post-decision finalization, so `waitUntil` is the knob
+ * that decides whether we pay it.
+ */
+describe("waitUntil — how far to wait for a write", () => {
+  it("accepts exactly the two targets the SDK defines, and nothing else", () => {
+    assert.equal(isWaitUntil("decided"), true);
+    assert.equal(isWaitUntil("finalized"), true);
+    assert.equal(isWaitUntil("accepted"), false); // the SDK's name for it is "decided"
+    assert.equal(isWaitUntil(""), false);
+    assert.equal(isWaitUntil("DECIDED"), false);
+    assert.deepEqual([...WAIT_UNTIL_VALUES], ["decided", "finalized"]);
+  });
+
+  it("passes the chosen target through to the SDK rather than defaulting silently", async () => {
+    const seen: string[] = [];
+    const client = {
+      waitForTransactionReceipt: async (a: { waitUntil: string }) => {
+        seen.push(a.waitUntil);
+        return asReceipt(SIMPLIFIED_FINALIZED_RETURN);
+      },
+    };
+
+    await waitForFinalized(client as never, "0xabc", "create_receipt", { intervalMs: 1, waitUntil: "decided" });
+    assert.deepEqual(seen, ["decided"]);
+
+    await waitForFinalized(client as never, "0xabc", "create_receipt", { intervalMs: 1 });
+    assert.deepEqual(seen, ["decided", "finalized"]); // absent means finalized, as before
+  });
+
+  it("names the target it could not reach, so a timeout is not misread", async () => {
+    const client = {
+      waitForTransactionReceipt: async () => {
+        throw new Error("HTML error page");
+      },
+    };
+
+    await assert.rejects(
+      () => waitForFinalized(client as never, "0xdead", "challenge", { intervalMs: 1, budgetMs: 20, waitUntil: "decided" }),
+      (e: Error) => {
+        assert.match(e.message, /a decision could not be confirmed/);
         return true;
       }
     );

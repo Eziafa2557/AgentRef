@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { ADJUDICATION_STEPS, adjudicateOnChain, adjudicateStep, isAdjudicationStep } from "@/core/genlayer/runtime";
-import type { GenLayerOutcome } from "@/core/genlayer/runtime";
+import { ADJUDICATION_STEPS, WAIT_UNTIL_VALUES, adjudicateOnChain, adjudicateStep, isAdjudicationStep, isWaitUntil } from "@/core/genlayer/runtime";
+import type { GenLayerOutcome, WaitUntil } from "@/core/genlayer/runtime";
 
 /**
  * One adjudication is THREE writes (create_receipt → challenge → adjudicate),
@@ -38,12 +38,29 @@ export async function POST(req: Request) {
     );
   }
 
+  // How far to wait for each write. Defaults to `finalized` — the behaviour the
+  // app has always had. `decided` is measurably much faster, and is opt-in here
+  // so it can be exercised (and proven or disproven) without changing what the
+  // UI does.
+  const rawWaitUntil = typeof body.waitUntil === "string" ? body.waitUntil.trim() : "";
+  if (rawWaitUntil && !isWaitUntil(rawWaitUntil)) {
+    return NextResponse.json(
+      {
+        status: "error",
+        message: `Unknown waitUntil "${rawWaitUntil}". Expected one of: ${WAIT_UNTIL_VALUES.join(", ")} — or omit it for "finalized".`,
+      } satisfies GenLayerOutcome,
+      { status: 400 }
+    );
+  }
+  const waitUntil = rawWaitUntil ? (rawWaitUntil as WaitUntil) : undefined;
+
   const args = {
     brief,
     work,
     reason,
     agent: typeof body.agent === "string" ? body.agent.trim() : "",
     evidence: Array.isArray(body.evidence) ? (body.evidence as Array<{ label?: string; content?: string }>) : typeof body.evidence === "string" ? body.evidence : undefined,
+    waitUntil,
   };
 
   // An unknown step is a caller bug — reject it rather than silently running
