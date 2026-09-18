@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 
 import type { GenLayerTransaction } from "genlayer-js/types";
 
-import { ADJUDICATION_STEPS, WAIT_UNTIL_VALUES, isAdjudicationStep, isWaitUntil, stepCallFor, waitForFinalized, writeSucceeded } from "./runtime";
+import { ADJUDICATION_STEPS, DEFAULT_STEP_WAIT_UNTIL, WAIT_UNTIL_VALUES, isAdjudicationStep, isWaitUntil, shouldRetryAfterFinalize, stepCallFor, stepWaitUntil, waitForFinalized, writeSucceeded } from "./runtime";
 import type { NormalizedArgs } from "./runtime";
 
 /** `status` is the enum INDEX on the wire: FINALIZED=7, ACCEPTED=5. */
@@ -194,6 +194,42 @@ describe("waitUntil — how far to wait for a write", () => {
         return true;
       }
     );
+  });
+
+  it("the step sequence uses the fast wait by default, and still honours an override", () => {
+    // The default is what the UI actually gets. If someone changes it back to
+    // "finalized", adjudication silently gets ~3x slower — so pin it.
+    assert.equal(DEFAULT_STEP_WAIT_UNTIL, "decided");
+    assert.equal(stepWaitUntil({}), "decided");
+    assert.equal(stepWaitUntil({ waitUntil: "finalized" }), "finalized");
+  });
+});
+
+/**
+ * The retry is what keeps the fast path from being brittle, and it is also the
+ * one place that could double-write the contract. Both halves matter: retry a
+ * write that ran and failed, never one we merely failed to confirm.
+ */
+describe("shouldRetryAfterFinalize — when a failed step may be retried", () => {
+  const EXECUTED_AND_FAILED =
+    "challenge did not succeed. status=7 (FINALIZED), txExecutionResult=2 (FINISHED_WITH_ERROR) (tx 0xabc).";
+  const NOT_CONFIRMED =
+    "challenge was submitted (0xabc) but finalization could not be confirmed within 90s (last poll error: HTML error page).";
+
+  it("retries a write that ran and reverted, when the predecessor is known", () => {
+    assert.equal(shouldRetryAfterFinalize("decided", EXECUTED_AND_FAILED, "0xprev"), true);
+  });
+
+  it("never retries a write it merely failed to CONFIRM — that could double-submit", () => {
+    assert.equal(shouldRetryAfterFinalize("decided", NOT_CONFIRMED, "0xprev"), false);
+  });
+
+  it("does not retry without the predecessor's hash, since there is nothing to finalize", () => {
+    assert.equal(shouldRetryAfterFinalize("decided", EXECUTED_AND_FAILED, undefined), false);
+  });
+
+  it("does not retry when the caller already asked for the certain path", () => {
+    assert.equal(shouldRetryAfterFinalize("finalized", EXECUTED_AND_FAILED, "0xprev"), false);
   });
 });
 

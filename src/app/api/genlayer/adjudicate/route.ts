@@ -61,6 +61,9 @@ export async function POST(req: Request) {
     agent: typeof body.agent === "string" ? body.agent.trim() : "",
     evidence: Array.isArray(body.evidence) ? (body.evidence as Array<{ label?: string; content?: string }>) : typeof body.evidence === "string" ? body.evidence : undefined,
     waitUntil,
+    // The browser sends the previous step's transaction so a fast-path failure
+    // can be retried on the certain route instead of dead-ending.
+    afterTx: typeof body.afterTx === "string" && body.afterTx.trim() ? body.afterTx.trim() : undefined,
   };
 
   // An unknown step is a caller bug — reject it rather than silently running

@@ -354,6 +354,31 @@ async function agentRefSurfaceProblem(
   return null;
 }
 
+/**
+ * The wait the app's step sequence uses unless a caller overrides it.
+ *
+ * `decided` on purpose: measured on Studio Dev, waiting for finalization as well
+ * cost ~87s across the three writes, and the decision alone was proven enough
+ * for the sequence to complete and the contract to reach a verdict.
+ */
+export const DEFAULT_STEP_WAIT_UNTIL: WaitUntil = "decided";
+
+export function stepWaitUntil(args: { waitUntil?: WaitUntil }): WaitUntil {
+  return args.waitUntil ?? DEFAULT_STEP_WAIT_UNTIL;
+}
+
+/**
+ * Whether a failed step may be retried after finalizing its predecessor.
+ *
+ * Deliberately narrow. Only a write that RAN and failed ("did not succeed") is
+ * retryable: it reverted, so re-submitting is safe and is the only way to make
+ * progress. A failure to CONFIRM says nothing about whether the write landed,
+ * and re-submitting there could double-write the contract.
+ */
+export function shouldRetryAfterFinalize(waitUntil: WaitUntil, message: string, afterTx?: string): boolean {
+  return waitUntil === "decided" && !!afterTx && /did not succeed/.test(message);
+}
+
 export interface AdjudicateArgs {
   brief: string;
   work: string;
@@ -361,11 +386,19 @@ export interface AdjudicateArgs {
   agent?: string;
   evidence?: Array<{ label?: string; content?: string }> | string;
   /**
-   * How far to wait for each write. Defaults to `finalized`, which is what the
-   * app has always done. `decided` is measurably much faster and is opt-in per
-   * caller until it is proven safe for the step sequence — see WaitUntil.
+   * How far to wait for each write. Defaults to `decided` — the validators'
+   * ruling, which is measurably ~3x faster than also waiting for the protocol
+   * to finalize it, and is proven sufficient for the step sequence. Pass
+   * `finalized` to wait for the slower, irreversible state.
    */
   waitUntil?: WaitUntil;
+  /**
+   * The previous step's transaction, when the caller is driving the sequence
+   * step by step. Used only if the fast path fails: the route finalizes it and
+   * retries, so a slow chain degrades to the old, certain behaviour instead of
+   * failing the adjudication.
+   */
+  afterTx?: string;
 }
 
 /** The three writes the contract requires, in the order it requires them. */
@@ -488,29 +521,56 @@ export async function adjudicateStep(step: AdjudicationStep, args: AdjudicateArg
   if (!prep.ok) return prep.outcome;
   const { client, contractAddress, network, chainLabel, args: normalized } = prep.prepared;
 
+  // The fast path: stop at the decision instead of waiting for the protocol to
+  // finalize it.
+  //
+  // PROVEN on Studio Dev, 2026-09-17: with the decision as the only wait, all
+  // three writes completed in ~53s (create 14.7s, challenge 8.1s, adjudicate
+  // 30.1s) against ~140s waiting for finalization — `challenge` did see a
+  // `create_receipt` that had not been finalized, and the contract reached
+  // VERIFIED 1/1. The finalization wait is a second, separate phase the chain
+  // performs AFTER the validators have already ruled.
+  const waitUntil = stepWaitUntil(args);
+  const [functionName, callArgs] = stepCallFor(step, normalized);
+
+  const done = (txHash: string, timings: WriteTimings, waited: WaitUntil): GenLayerOutcome => ({
+    status: "step-done",
+    step,
+    transactionHash: txHash,
+    contractAddress,
+    network,
+    chainLabel,
+    explorerUrl: explorerTxUrl(txHash),
+    waitUntil: waited,
+    timings,
+    note: `${functionName} ${waited === "decided" ? "decided" : "finalized"} on-chain.`,
+  });
+
   try {
-    const [functionName, callArgs] = stepCallFor(step, normalized);
-    const { txHash, timings } = await writeAndWait(
-      client,
-      contractAddress,
-      functionName,
-      callArgs,
-      args.waitUntil
-    );
-    return {
-      status: "step-done",
-      step,
-      transactionHash: txHash,
-      contractAddress,
-      network,
-      chainLabel,
-      explorerUrl: explorerTxUrl(txHash),
-      waitUntil: args.waitUntil ?? "finalized",
-      timings,
-      note: `${functionName} ${args.waitUntil === "decided" ? "decided" : "finalized"} on-chain.`,
-    };
+    const { txHash, timings } = await writeAndWait(client, contractAddress, functionName, callArgs, waitUntil);
+    return done(txHash, timings, waitUntil);
   } catch (e) {
-    return { status: "error", message: e instanceof Error ? e.message : String(e) };
+    const first = e instanceof Error ? e.message : String(e);
+    const afterTx = args.afterTx;
+
+    // The decision is enough only if the PREVIOUS write is already visible to
+    // this one. If that ever fails, the write executes and reverts — it does
+    // not vanish — so finalize the predecessor and retry once on the slow,
+    // certain route rather than dead-ending the adjudication.
+    if (afterTx && shouldRetryAfterFinalize(waitUntil, first, afterTx)) {
+      try {
+        await waitForFinalized(client, afterTx, "the previous step", { waitUntil: "finalized" });
+        const { txHash, timings } = await writeAndWait(client, contractAddress, functionName, callArgs, "finalized");
+        return done(txHash, timings, "finalized");
+      } catch (retryError) {
+        const second = retryError instanceof Error ? retryError.message : String(retryError);
+        return {
+          status: "error",
+          message: `${first} Retrying ${step} after finalizing the previous write also failed: ${second}`,
+        };
+      }
+    }
+    return { status: "error", message: first };
   }
 }
 

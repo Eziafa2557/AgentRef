@@ -39,7 +39,7 @@ const SIM_STEPS = [
    driven as three separate requests (see adjudicateOnGenLayer), so each gets its
    own spinner instead of one spinner covering ~140s of work. */
 const GL_STEPS = [
-  { title: "Create the work receipt on-chain", detail: "create_receipt(brief, work, evidence, agent), signed server-side and awaited to FINALIZED." },
+  { title: "Create the work receipt on-chain", detail: "create_receipt(brief, work, evidence, agent), signed server-side and awaited to the validators' decision." },
   { title: "Raise the challenge on-chain", detail: "challenge(reason, evidence) — the dispute is recorded against the receipt." },
   { title: "Adjudicate on GenLayer validators", detail: `adjudicate() on the live ${LIVE_CONTRACT.chainLabel} contract. Validator consensus decides — not an in-app AI.` },
   { title: "Read the on-chain verdict", detail: "Calls get_receipt() and parses Status / Score / Reason from the contract's public record." },
@@ -158,6 +158,9 @@ export default function VerifyPage() {
     let contractAddress: string | undefined;
     let txHash: string | undefined;
     let stepFailure: string | null = null;
+    // Each step is sent the one before it, so a fast-path failure can be
+    // retried after that write finalizes rather than failing the whole run.
+    let afterTx: string | undefined;
 
     const STEPS = ["create", "challenge", "adjudicate"] as const;
     for (let i = 0; i < STEPS.length && !stepFailure; i++) {
@@ -166,7 +169,7 @@ export default function VerifyPage() {
         const res = await fetch("/api/genlayer/adjudicate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...payload, step: STEPS[i] }),
+          body: JSON.stringify({ ...payload, step: STEPS[i], afterTx }),
         });
         const out = (await res.json()) as StepOut;
         if (out.status === "error" || out.status === "not-configured") {
@@ -175,6 +178,7 @@ export default function VerifyPage() {
           break;
         }
         contractAddress = out.contractAddress ?? contractAddress;
+        afterTx = out.transactionHash ?? afterTx;
         // Only adjudicate() produces the verdict, so its tx is the provenance.
         if (STEPS[i] === "adjudicate") txHash = out.transactionHash;
       } catch {
